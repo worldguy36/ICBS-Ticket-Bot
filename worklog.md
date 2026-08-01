@@ -292,3 +292,48 @@ Stage Summary:
 - ✅ New ICBS_PUBLIC_URL env var lets the bot construct the absolute URL Discord needs.
 - ✅ All changes pushed to https://github.com/worldguy36/ICBS-Ticket-Bot
 - IMPORTANT for the user: when deploying on Render, set ICBS_PUBLIC_URL=https://icbs-ticket-bot.onrender.com (or your chosen subdomain) so Discord can fetch the logo. If you leave it empty, embeds fall back to Discord's default avatar.
+
+---
+Task ID: 7
+Agent: Super Z (main)
+Task: (1) Make an actual website appear for the bot's status (instead of JSON). (2) Fix UptimeRobot not being able to monitor the website.
+
+Work Log:
+- Stopped the local bot.
+- Added generateStatusPage() function (~340 lines) that returns a full HTML page with:
+  • Header: ICBS logo (72x72, rounded), "𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 𝑇𝑖𝑐𝑘𝑒𝑡 𝐵𝑜𝑡" title (Georgia serif), subtitle, and a status badge (LIVE/DEMO/STARTING) with a pulsing dot animation.
+  • Ticket Statistics section: 5 stat tiles (Total, Open, Closed, Next ID, Categories) in a responsive grid with color-coded values (green=open, grey=closed, gold=next).
+  • Bot Information section: 8 info items in a 2-column grid (Bot Tag, Bot ID, Guild, Guild ID, Mode, Ready, Uptime, Port).
+  • Configuration Checks table: 9 env vars (DISCORD_BOT_TOKEN through ICBS_PUBLIC_URL) with ✅/❌ indicators and descriptions.
+  • Ticket Categories section: chips showing emoji + label for each of the 5 categories.
+  • Ticket Panel section (conditional): shows panel message ID + channel ID if a panel has been posted.
+  • Recent Tickets section: last 8 tickets with ID, category, opener, claimed-by, status badge (color-coded), and timestamp.
+  • Footer: branding + links to /health, /ping, /uptime, /brand-icon.webp + last-updated timestamp.
+  • Auto-refresh every 30 seconds via <meta http-equiv="refresh" content="30">.
+  • Dark theme (#0a0a0a background, #141414 sections, #2b2b2b borders) matching Discord aesthetic.
+  • Responsive CSS (mobile breakpoint at 600px — stacks header, single-column info grid, simplified ticket rows).
+  • Logo as favicon via <link rel="icon">.
+- Added escapeHtml() helper to safely output user-generated content (guild name, bot tag, etc.).
+- Added formatUptime() helper for human-readable uptime (e.g. "2h 15m", "3d 4h").
+- Changed GET / handler: now serves the HTML page (Content-Type: text/html; charset=utf-8) instead of the tiny JSON response.
+- Added GET /status and GET /dashboard as aliases that serve the same HTML page.
+- Added GET /uptime endpoint: returns plain text "OK" (Content-Type: text/plain) with HTTP 200. This is the simplest possible response — no JSON parsing, no HTML rendering, just a 200 with "OK". Any uptime monitor (UptimeRobot, Pingdom, etc.) can detect the service is alive.
+- Kept GET /health as JSON for API consumers (backward-compatible).
+- Kept GET /ping as lightweight JSON.
+- Updated startup log to list all 7 endpoints + show public URL info (status page URL, uptime monitor URL, brand icon URL).
+- Wrote scripts/test-html-status.sh to verify the HTML page + /uptime endpoint.
+- Tested locally:
+  * GET / returns 10,498-char HTML page, HTTP 200, Content-Type: text/html; charset=utf-8.
+  * HTML contains: 𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 𝑇𝑖𝑐𝑘𝑒𝑡 𝐵𝑜𝑡 title, LIVE badge, Total Tickets stat, Configuration Checks section, brand-icon.webp logo URL.
+  * GET /uptime returns HTTP 200 with plain text "OK".
+  * GET /status and /dashboard aliases work (both return the same HTML, 10,756 bytes).
+  * GET /health still returns JSON (mode=live, ready=true, totalTickets=0).
+- Committed 2 files (+419 / -19) and pushed to GitHub.
+
+Stage Summary:
+- ✅ Visiting the bot's URL in a browser now shows a full HTML status website (dark theme, logo, stats, config checks, recent tickets, auto-refresh).
+- ✅ Added /uptime endpoint returning plain text "OK" — UptimeRobot can definitely monitor this.
+- ✅ /health (JSON) and /ping (JSON) still work for API consumers.
+- ✅ /status and /dashboard aliases for the HTML page.
+- ✅ All changes pushed to https://github.com/worldguy36/ICBS-Ticket-Bot
+- For UptimeRobot: set the monitor URL to https://icbs-ticket-bot.onrender.com/uptime (or /ping, or / — all return 200).
