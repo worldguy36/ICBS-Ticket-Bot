@@ -1,10 +1,30 @@
 # =============================================================================
-# Render Blueprint — 𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 𝑇𝑖𝑐𝑘𝑒𝑡 𝐵𝑜𝑭
+# Render Blueprint — 𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 𝑇𝑖𝑐𝑘𝑒𝑡 𝐵𝑜𝑡
 # ----------------------------------------------------------------------------
-# To deploy: push this file to your repo, then go to:
-#   https://dashboard.render.com/blueprints
-# and select this repo. Render will read this file and create the service
-# automatically. You'll be prompted for the two `sync: false` secrets.
+# To deploy:
+#   1. Push this file to your repo (done: github.com/worldguy36/ICBS-Ticket-Bot)
+#   2. Go to https://dashboard.render.com/blueprints
+#   3. Click "New Blueprint Instance" and select this repo
+#   4. Render reads render.yaml and creates the service automatically
+#   5. You'll be prompted to enter EVERY env var below in the Render UI
+#
+# TWO WAYS TO CONFIGURE:
+#
+#   PATH A — Minimal (auto-setup):
+#     Enter only these 3 required vars. Leave the others EMPTY.
+#       • DISCORD_BOT_TOKEN
+#       • DISCORD_GUILD_ID
+#       • ICBS_WEBHOOK_SECRET
+#     Then after deploy, call POST /setup-guild once to auto-create the
+#     channels + roles. Paste the returned IDs back into Render's env vars
+#     (so they persist across restarts) — OR leave them empty and the bot
+#     will keep using the auto-created ones (they're stored in tickets.json).
+#     Wait — actually the bot reads them from env at startup, so if you want
+#     them to persist you MUST paste them back into Render. See README.
+#
+#   PATH B — Full manual:
+#     Enter ALL the env vars with IDs from your Discord server.
+#     Right-click channels/roles in Discord (Developer Mode) → Copy ID.
 #
 # After deploy, the service will be reachable at:
 #   https://icbs-ticket-bot.onrender.com  (or your chosen subdomain)
@@ -17,12 +37,12 @@ services:
     plan: free
     region: oregon
 
-    # Build: install deps at repo root (where this package.json lives).
+    # Build: install deps at repo root (where package.json lives).
     buildCommand: bun install
     # Start: run the bot. It binds to 0.0.0.0:$PORT automatically.
     startCommand: bun mini-services/icbs-ticket-bot/index.ts
 
-    # Render will ping this path to check if the service is live.
+    # Render pings this path to check if the service is live.
     # / returns a tiny 200 JSON payload — perfect for the health check.
     healthCheckPath: /
 
@@ -31,28 +51,78 @@ services:
     branch: main
 
     envVars:
-      # --- Secrets (you'll be prompted for these in the dashboard) ---
+      # === REQUIRED (Path A or B) ===
       - key: DISCORD_BOT_TOKEN
         sync: false
+        # Description (shown in Render UI): Your Discord bot token from
+        # https://discord.com/developers/applications → your app → Bot → Reset Token.
+        # Example: MTUzMzEyODgxMDg2OTAzMDk5Mg.GZ3VO7.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+      - key: DISCORD_GUILD_ID
+        sync: false
+        # Description: The ID of your Discord server. Enable Developer Mode in
+        # Discord settings, then right-click your server name → Copy ID.
+        # Example: 1509170609760763964
+
       - key: ICBS_WEBHOOK_SECRET
         sync: false
+        # Description: Any random string used to authenticate /setup-panel
+        # and /setup-guild calls. Generate one with: openssl rand -hex 24
+        # Example: e6f71b539f56bae5c56d5a4b96e5426fc4650e26fe63c879
 
-      # --- Pre-filled with the discovered values from your Discord server ---
-      # Server: 𝐌𝐢𝐥𝐢𝐭𝐚𝐫𝐲 𝐂𝐡𝐞𝐜𝐤𝐩𝐨𝐢𝐧𝐭 𝐑𝐨𝐥𝐞𝐩𝐥𝐚𝐲
-      - key: DISCORD_GUILD_ID
-        value: "1509170609760763964"
+      # === OPTIONAL — leave EMPTY to auto-create via POST /setup-guild (Path A) ===
+      # ===                OR fill in if you already have these resources (Path B) ===
+
       - key: TICKET_PANEL_CHANNEL_ID
-        value: "1533131440496316587"
-      - key: TICKET_LOG_CHANNEL_ID
-        value: "1533131442077302907"
-      - key: TICKET_CATEGORY_ID
-        value: "1533131438587773021"
-      - key: TICKET_ADMIN_ROLE_ID
-        value: "1533130635131092995"
-      - key: TICKET_STAFF_ROLE_IDS
-        value: "1510013691515502843"
+        sync: false
+        # Description (Path B): Channel ID where the ticket panel embed + select
+        # menu will be posted. Right-click the channel → Copy ID.
+        # Leave EMPTY (Path A) — /setup-guild will create "#ticket-panel" for you.
+        # Example: 1533131440496316587
 
-      # Render sets PORT automatically — the bot reads it.
-      # ICBS_BOT_PORT is only used in local dev / detached-child mode.
+      - key: TICKET_LOG_CHANNEL_ID
+        sync: false
+        # Description (Path B): Channel ID for ticket open/close logs + transcripts.
+        # Right-click the channel → Copy ID.
+        # Leave EMPTY (Path A) — /setup-guild will create "#ticket-logs" for you.
+        # Example: 1533131442077302907
+
+      - key: TICKET_CATEGORY_ID
+        sync: false
+        # Description (Path B): Discord Channel Category ID under which ticket
+        # channels are created. Right-click the category → Copy ID.
+        # Leave EMPTY (Path A) — /setup-guild will create "🎫 Tickets" for you.
+        # Example: 1533131438587773021
+
+      - key: TICKET_ADMIN_ROLE_ID
+        sync: false
+        # Description (Path B): Role ID with full access to ALL tickets.
+        # Right-click the role in Server Settings → Roles → Copy ID.
+        # Leave EMPTY (Path A) — /setup-guild will create "ICBS Ticket Bot" role.
+        # Example: 1533130635131092995
+
+      - key: TICKET_STAFF_ROLE_IDS
+        sync: false
+        # Description (Path B): Comma-separated staff role IDs (added to every
+        # ticket channel). Right-click each role → Copy ID, join with commas.
+        # Leave EMPTY (Path A) — /setup-guild will create "Support Staff" role.
+        # Example: 1510013691515502843  OR  111,222,333 for multiple
+
+      # === OPTIONAL — advanced ===
+
       - key: ICBS_BOT_PORT
         value: "3040"
+        # Description: Port for local dev / detached-child mode. Render sets
+        # PORT automatically (the bot reads it), so this is ignored on Render.
+
+      - key: ICBS_BRAND_ICON_URL
+        sync: false
+        # Description (optional): URL to an icon used in embed author/footer.
+        # Leave empty to use the Discord default avatar.
+        # Example: https://example.com/icbs-logo.png
+
+      - key: TICKET_CATEGORY_ROLES
+        sync: false
+        # Description (optional): JSON map of category id → staff role id, to
+        # override TICKET_STAFF_ROLE_IDS per category.
+        # Example: {"general":"111","bug":"222","billing":"333"}

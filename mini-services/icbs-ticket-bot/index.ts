@@ -309,7 +309,36 @@ client.once(Events.ClientReady, async (c) => {
     } catch (err) {
       console.warn('[ticket-bot] could not fetch guild:', err);
     }
+  } else {
+    console.warn('[ticket-bot] ⚠️ DISCORD_GUILD_ID not set — bot cannot operate. Set it in Render env vars.');
   }
+
+  // Print a clear config report so the user knows what's missing.
+  console.log('');
+  console.log('─'.repeat(60));
+  console.log('📋 Configuration report');
+  console.log('─'.repeat(60));
+  const configChecks: Array<[string, boolean, string]> = [
+    ['DISCORD_BOT_TOKEN', !!TOKEN, 'Bot token (REQUIRED)'],
+    ['DISCORD_GUILD_ID', !!GUILD_ID, 'Server ID (REQUIRED)'],
+    ['TICKET_PANEL_CHANNEL_ID', !!PANEL_CHANNEL_ID, 'Channel for the ticket panel — leave empty to auto-create via POST /setup-guild'],
+    ['TICKET_LOG_CHANNEL_ID', !!LOG_CHANNEL_ID, 'Channel for ticket logs — leave empty to auto-create via POST /setup-guild'],
+    ['TICKET_CATEGORY_ID', !!TICKET_CATEGORY_ID, 'Discord category for ticket channels — leave empty to auto-create via POST /setup-guild'],
+    ['TICKET_ADMIN_ROLE_ID', !!ADMIN_ROLE_ID, 'Role with full ticket access — leave empty to auto-create via POST /setup-guild'],
+    ['TICKET_STAFF_ROLE_IDS', STAFF_ROLE_IDS.length > 0, 'Comma-separated staff role IDs — leave empty to auto-create via POST /setup-guild'],
+    ['ICBS_WEBHOOK_SECRET', !!WEBHOOK_SECRET, 'Secret for /setup-panel and /setup-guild auth (REQUIRED)'],
+  ];
+  for (const [key, ok, hint] of configChecks) {
+    console.log(`  ${ok ? '✅' : '⚠️ '} ${key.padEnd(28)} ${ok ? 'set' : 'NOT SET'}  — ${hint}`);
+  }
+  console.log('─'.repeat(60));
+  if (!PANEL_CHANNEL_ID || !LOG_CHANNEL_ID || !TICKET_CATEGORY_ID || !ADMIN_ROLE_ID || !STAFF_ROLE_IDS.length) {
+    console.log('💡 Tip: Call POST /setup-guild to auto-create missing channels + roles.');
+    console.log('   curl -X POST <BOT_URL>/setup-guild -H "x-icbs-secret: $ICBS_WEBHOOK_SECRET" -d \'{"postPanel":true}\'');
+    console.log('─'.repeat(60));
+  }
+  console.log('');
+
   // Register the /ticket-stats slash command
   try {
     await registerSlashCommands();
@@ -1015,11 +1044,24 @@ async function setupPanel(opts: {
   description?: string;
   categories?: Array<Partial<Category> & { id: string }>;
 }): Promise<{ ok: boolean; messageId?: string; channelId?: string; error?: string }> {
+  return setupPanelWithIds(PANEL_CHANNEL_ID, opts);
+}
+
+// Variant that takes an explicit panel channel ID — used by /setup-guild when
+// the channel was just created and PANEL_CHANNEL_ID env var isn't set yet.
+async function setupPanelWithIds(
+  panelChannelId: string,
+  opts: {
+    title?: string;
+    description?: string;
+    categories?: Array<Partial<Category> & { id: string }>;
+  },
+): Promise<{ ok: boolean; messageId?: string; channelId?: string; error?: string }> {
   if (DEMO_MODE) {
     return { ok: false, error: 'Bot is in demo mode (no DISCORD_BOT_TOKEN).' };
   }
   if (!guild) return { ok: false, error: 'Guild not resolved.' };
-  if (!PANEL_CHANNEL_ID) return { ok: false, error: 'TICKET_PANEL_CHANNEL_ID not set.' };
+  if (!panelChannelId) return { ok: false, error: 'No panel channel ID provided (set TICKET_PANEL_CHANNEL_ID or call /setup-guild first).' };
 
   // Optionally replace categories
   if (Array.isArray(opts.categories) && opts.categories.length > 0) {
@@ -1069,7 +1111,7 @@ async function setupPanel(opts: {
   const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
 
   try {
-    const channel = await guild.channels.fetch(PANEL_CHANNEL_ID);
+    const channel = await guild.channels.fetch(panelChannelId);
     if (!channel || channel.type !== ChannelType.GuildText) {
       return { ok: false, error: 'Panel channel not found or not a text channel.' };
     }
@@ -1080,6 +1122,168 @@ async function setupPanel(opts: {
     return { ok: true, messageId: msg.id, channelId: msg.channelId };
   } catch (err) {
     return { ok: false, error: String(err) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-setup — creates the Discord-side resources (category, channels, roles)
+// if they don't exist yet, OR reuses existing ones matched by name. Returns
+// the IDs so the caller can paste them into Render's env vars.
+//
+// This is invoked by POST /setup-guild. It lets you deploy the bot with ONLY
+// DISCORD_BOT_TOKEN + DISCORD_GUILD_ID + ICBS_WEBHOOK_SECRET configured, then
+// call /setup-guild once to create everything else.
+// ---------------------------------------------------------------------------
+interface SetupGuildResult {
+  ok: boolean;
+  created?: string[];
+  reused?: string[];
+  ids?: {
+    TICKET_CATEGORY_ID: string;
+    TICKET_PANEL_CHANNEL_ID: string;
+    TICKET_LOG_CHANNEL_ID: string;
+    TICKET_ADMIN_ROLE_ID: string;
+    TICKET_STAFF_ROLE_IDS: string;
+  };
+  error?: string;
+}
+
+async function setupGuild(opts: {
+  categoryName?: string;
+  panelChannelName?: string;
+  logsChannelName?: string;
+  adminRoleName?: string;
+  staffRoleName?: string;
+  postPanel?: boolean;
+}): Promise<SetupGuildResult> {
+  if (DEMO_MODE) {
+    return { ok: false, error: 'Bot is in demo mode (no DISCORD_BOT_TOKEN).' };
+  }
+  if (!guild) return { ok: false, error: 'Guild not resolved — set DISCORD_GUILD_ID.' };
+
+  const categoryName = opts.categoryName || '🎫 Tickets';
+  const panelName = opts.panelChannelName || 'ticket-panel';
+  const logsName = opts.logsChannelName || 'ticket-logs';
+  const adminName = opts.adminRoleName || 'ICBS Ticket Bot';
+  const staffName = opts.staffRoleName || 'Support Staff';
+
+  const created: string[] = [];
+  const reused: string[] = [];
+
+  try {
+    // Fetch everything
+    const [channels, roles] = await Promise.all([
+      guild.channels.fetch(),
+      guild.roles.fetch(),
+    ]);
+    const existingCategories = [...channels.values()].filter(
+      (c): c is NonNullable<typeof c> => !!c && c.type === ChannelType.GuildCategory,
+    );
+    const existingTextChannels = [...channels.values()].filter(
+      (c): c is NonNullable<typeof c> => !!c && c.type === ChannelType.GuildText,
+    );
+    const existingRoles = [...roles.values()].filter((r) => r && r.name !== '@everyone');
+
+    // 1. Category
+    let ticketCategory = existingCategories.find(
+      (c) => c.name.toLowerCase() === categoryName.toLowerCase(),
+    );
+    if (ticketCategory) {
+      reused.push(`category "${ticketCategory.name}" (${ticketCategory.id})`);
+    } else {
+      ticketCategory = await guild.channels.create({
+        name: categoryName,
+        type: ChannelType.GuildCategory,
+        reason: 'Ticket bot auto-setup — ticket channel category',
+      });
+      created.push(`category "${ticketCategory.name}" (${ticketCategory.id})`);
+    }
+
+    // 2. Panel channel
+    let panelChannel = existingTextChannels.find(
+      (c) => c.name.toLowerCase() === panelName.toLowerCase(),
+    );
+    if (panelChannel) {
+      reused.push(`channel #${panelChannel.name} (${panelChannel.id})`);
+    } else {
+      panelChannel = await guild.channels.create({
+        name: panelName,
+        type: ChannelType.GuildText,
+        parent: ticketCategory.id,
+        topic: `${BRAND_TICKET} — Support Desk. Select a category to open a ticket.`,
+        reason: 'Ticket bot auto-setup — panel channel',
+      });
+      created.push(`channel #${panelChannel.name} (${panelChannel.id})`);
+    }
+
+    // 3. Logs channel
+    let logsChannel = existingTextChannels.find(
+      (c) => c.name.toLowerCase() === logsName.toLowerCase(),
+    );
+    if (logsChannel) {
+      reused.push(`channel #${logsChannel.name} (${logsChannel.id})`);
+    } else {
+      logsChannel = await guild.channels.create({
+        name: logsName,
+        type: ChannelType.GuildText,
+        parent: ticketCategory.id,
+        topic: `${BRAND_TICKET} — ticket open/close logs and transcripts.`,
+        permissionOverwrites: [
+          {
+            id: guild.roles.everyone.id,
+            deny: [PermissionFlagsBits.ViewChannel],
+          },
+        ],
+        reason: 'Ticket bot auto-setup — logs channel',
+      });
+      created.push(`channel #${logsChannel.name} (${logsChannel.id})`);
+    }
+
+    // 4. Admin role
+    let adminRole = existingRoles.find(
+      (r) => r.name.toLowerCase() === adminName.toLowerCase(),
+    );
+    if (adminRole) {
+      reused.push(`role @${adminRole.name} (${adminRole.id})`);
+    } else {
+      adminRole = await guild.roles.create({
+        name: adminName,
+        permissions: PermissionFlagsBits.Administrator,
+        color: 0x2b2b2b,
+        reason: 'Ticket bot auto-setup — admin role',
+      });
+      created.push(`role @${adminRole.name} (${adminRole.id})`);
+    }
+
+    // 5. Staff role
+    let staffRole = existingRoles.find(
+      (r) => r.name.toLowerCase() === staffName.toLowerCase(),
+    );
+    if (staffRole) {
+      reused.push(`role @${staffRole.name} (${staffRole.id})`);
+    } else {
+      staffRole = await guild.roles.create({
+        name: staffName,
+        color: 0x2ecc71,
+        reason: 'Ticket bot auto-setup — staff role',
+      });
+      created.push(`role @${staffRole.name} (${staffRole.id})`);
+    }
+
+    return {
+      ok: true,
+      created,
+      reused,
+      ids: {
+        TICKET_CATEGORY_ID: ticketCategory.id,
+        TICKET_PANEL_CHANNEL_ID: panelChannel.id,
+        TICKET_LOG_CHANNEL_ID: logsChannel.id,
+        TICKET_ADMIN_ROLE_ID: adminRole.id,
+        TICKET_STAFF_ROLE_IDS: staffRole.id,
+      },
+    };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
   }
 }
 
@@ -1200,6 +1404,58 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // --- POST /setup-guild ---
+  // Auto-creates the Discord-side resources (category, channels, roles) and
+  // returns their IDs. Lets you deploy the bot with only DISCORD_BOT_TOKEN +
+  // DISCORD_GUILD_ID + ICBS_WEBHOOK_SECRET configured, then call this once to
+  // create everything else. Paste the returned IDs into Render's env vars.
+  //
+  // Body (all optional — defaults are used if omitted):
+  //   { categoryName?, panelChannelName?, logsChannelName?,
+  //     adminRoleName?, staffRoleName?, postPanel?: true }
+  if (req.method === 'POST' && pathname === '/setup-guild') {
+    const secret = req.headers['x-icbs-secret'];
+    if (!WEBHOOK_SECRET || secret !== WEBHOOK_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'Unauthorized: invalid or missing x-icbs-secret.' }));
+      return;
+    }
+
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    let parsed: any = {};
+    try {
+      parsed = body ? JSON.parse(body) : {};
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'Invalid JSON body.' }));
+      return;
+    }
+
+    const result = await setupGuild({
+      categoryName: parsed.categoryName,
+      panelChannelName: parsed.panelChannelName,
+      logsChannelName: parsed.logsChannelName,
+      adminRoleName: parsed.adminRoleName,
+      staffRoleName: parsed.staffRoleName,
+    });
+
+    // If setup succeeded and the caller asked to auto-post the panel, do that too.
+    if (result.ok && result.ids && parsed.postPanel) {
+      // Temporarily use the discovered IDs for panel posting
+      const panelResult = await setupPanelWithIds(result.ids.TICKET_PANEL_CHANNEL_ID, {
+        title: parsed.title,
+        description: parsed.description,
+        categories: parsed.categories,
+      });
+      (result as any).panel = panelResult;
+    }
+
+    res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result, null, 2));
+    return;
+  }
+
   // --- 404 ---
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: false, error: `Not found: ${req.method} ${pathname}` }));
@@ -1209,10 +1465,11 @@ const server = http.createServer(async (req, res) => {
 // (Render requires this — listening on localhost only won't pass health checks).
 server.listen(HTTP_PORT, '0.0.0.0', () => {
   console.log(`[ticket-bot] 🌐 HTTP server listening on http://0.0.0.0:${HTTP_PORT}`);
-  console.log(`[ticket-bot]    GET  /            (root health check — Render default)`);
-  console.log(`[ticket-bot]    GET  /ping        (lightweight, no auth)`);
-  console.log(`[ticket-bot]    GET  /health      (full status payload)`);
-  console.log(`[ticket-bot]    POST /setup-panel (auth: x-icbs-secret)`);
+  console.log(`[ticket-bot]    GET  /             (root health check — Render default)`);
+  console.log(`[ticket-bot]    GET  /ping         (lightweight, no auth)`);
+  console.log(`[ticket-bot]    GET  /health       (full status payload)`);
+  console.log(`[ticket-bot]    POST /setup-guild  (auth: x-icbs-secret — auto-create channels + roles)`);
+  console.log(`[ticket-bot]    POST /setup-panel  (auth: x-icbs-secret — post the ticket panel)`);
 });
 
 // ---------------------------------------------------------------------------
