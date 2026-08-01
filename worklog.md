@@ -67,3 +67,41 @@ Stage Summary:
   * `src/app/page.tsx`  (dashboard with Ticket Bot Status panel + setup form)
 - Bot compiles and runs in demo mode — verified by smoke test.
 - Next step for the user: fill in `.env` with real Discord credentials (a SEPARATE bot token from the news bot), set up the Discord-side channels/roles, then run `bun run dev` to bring it live. Use the dashboard's "Post / Update Panel" button to publish the ticket panel.
+
+---
+Task ID: 2
+Agent: Super Z (main)
+Task: Deploy the ICBS Ticket Bot to production — push to GitHub repo worldguy36/ICBS-Ticket-Bot, configure with provided Discord bot token, set up Discord-side resources, and bring the bot live.
+
+Work Log:
+- Inspected existing .git state — found the previous ticket-bot code had already been committed but `.env` and `tickets.json` were accidentally tracked. Removed them from git index.
+- Updated `.gitignore` to exclude: `.env`, `.env.*` (with `!.env.example` exception), `tickets.json`, `bun.lock`, `skills/`, `upload/`, `download/`, OS noise.
+- Generated a random 48-char hex `ICBS_WEBHOOK_SECRET` for secure web-app ↔ bot auth.
+- Wrote `/home/z/my-project/mini-services/icbs-ticket-bot/.env` with the provided Discord bot token, generated webhook secret, and placeholders for guild/channel/role IDs.
+- Wrote a root `README.md` documenting the repo layout, quick start, features, HTTP API, deployment, and Discord setup.
+- Configured git user (worldguy36 / noreply email) and added the remote `https://worldguy36:<PAT>@github.com/worldguy36/ICBS-Ticket-Bot.git`.
+- Committed (5 files changed: +123 / -74) and pushed to `main` — verified via GitHub API that all 4 bot files + 4 web-app routes + dashboard + worklog are present in the repo.
+- Wrote `scripts/discover-guild.ts` — connects to Discord, lists every guild with all categories, text channels (with parent), voice channels, and roles. Auto-detects likely ticket-panel/ticket-logs/Tickets-category/staff-role matches by name pattern.
+- Ran discovery — bot is in 1 guild: "𝐌𝐢𝐥𝐢𝐭𝐚𝐫𝐲 𝐂𝐡𝐞𝐜𝐤𝐩𝐨𝐢𝐧𝐭 𝐑𝐨𝐥𝐞𝐩𝐥𝐚𝐲" (ID 1509170609760763964). Confirmed the existing `📰-𝑇ℎ𝑒-𝐼𝐶𝐵𝑆-𝑇𝑖𝑚𝑒𝑠` news bot panel channel is there, so this is the right server. Found an existing `@ICBS Ticket Bot` role with Administrator perms and `@Support Staff` role — both perfect for reuse. No #ticket-panel channel, #ticket-logs channel, or Tickets category existed yet.
+- Wrote `scripts/setup-guild.ts` — idempotent setup script that creates the missing Discord resources and writes their IDs back to `.env`.
+- Ran setup — created: `🎫 Tickets` category (1533131438587773021), `#ticket-panel` channel (1533131440496316587), `#ticket-logs` channel (1533131442077302907). Reused existing `@ICBS Ticket Bot` role (1533130635131092995) as admin and `@Support Staff` role (1510013691515502843) as staff. All 6 IDs written to `.env`.
+- Wrote `scripts/start-and-post-panel.sh` — starts the bot via `bun index.ts` in the background, waits for "Ready" in the log (took 3s), verifies `/health` returns `mode=live`, then POSTs to `/setup-panel` with the webhook secret to publish the ticket panel.
+- Ran the start script — bot logged in as `ICBS Ticket Bot#1267` (application ID 1533128810869030992), resolved the guild, registered the `/ticket-stats` slash command, and became ready in 3 seconds. Health check confirmed: mode=live, ready=true, all 8 config checks true, 6 categories loaded.
+- Panel POST returned `{ ok: true, messageId: 1533131560260468820, channelId: 1533131440496316587 }` — panel successfully posted to #ticket-panel.
+- Wrote `scripts/verify-panel.ts` to fetch the panel message back from Discord and confirm its contents: 1 embed (title "𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 𝑇𝑖𝑐𝑘𝑒𝑡 𝐵𝑜𝑡 — Support Desk", author "𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 𝑇𝑖𝑐𝑘𝑒𝑡 𝐵𝑜𝑡", footer "𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 — Support Delivered", color #2b2b2b, 2 fields 🎫 Categories + 📋 Rules) + 1 action row containing a StringSelectMenu with customId `icbs_ticket_panel` and all 6 options (🟥 General, 🟧 Bug, 🟨 Billing, 🟩 Partnership, 🟦 Staff, 🟪 Appeal).
+- Bot left running in background (PID 1767) — `/health` confirms it's still alive and the panel is posted.
+
+Stage Summary:
+- ✅ Code pushed to https://github.com/worldguy36/ICBS-Ticket-Bot (branch: main)
+- ✅ Bot token configured in `.env` (file is gitignored — never committed)
+- ✅ All required Discord resources created in the 𝐌𝐢𝐥𝐢𝐭𝐚𝐫𝐲 𝐂𝐡𝐞𝐜𝐤𝐩𝐨𝐢𝐧𝐭 𝐑𝐨𝐥𝐞𝐩𝐥𝐚𝐲 guild: 🎫 Tickets category, #ticket-panel, #ticket-logs
+- ✅ Existing @ICBS Ticket Bot + @Support Staff roles reused as admin/staff
+- ✅ Bot is LIVE: logged in as ICBS Ticket Bot#1267, slash command /ticket-stats registered
+- ✅ Ticket panel posted to #ticket-panel — verified via Discord API that the embed + 6-option select menu are visible
+- 🟢 Bot still running in background (PID 1767). Health endpoint: http://localhost:3040/health
+- Next steps for the user:
+  1. Open Discord → #ticket-panel → click the select menu → pick a category → ticket channel will be created.
+  2. Test the buttons: 📋 Claim, 🔒 Close, 🔴 Close with Reason (modal), ↩️ Reopen.
+  3. Try `/ticket-stats` to see the stats embed.
+  4. To stop the bot: `kill 1767`. To restart: `cd mini-services/icbs-ticket-bot && bun run dev`.
+  5. For Render deployment: set the same env vars on the Render service and let the Next.js web app spawn it as a detached child (Option A in the bot README).
