@@ -253,3 +253,42 @@ Stage Summary:
 - ✅ Bot running locally with new UI, panel posted to Discord and verified.
 - ✅ All changes pushed to https://github.com/worldguy36/ICBS-Ticket-Bot
 - Next step for the user: deploy on Render via Blueprint. Render will prompt for each env var with the question-style descriptions. Use the values from your .env file (which has all 8 vars filled in).
+
+---
+Task ID: 6
+Agent: Super Z (main)
+Task: (1) Make each ticket category show a modal/form for the user to fill out before creating the ticket. (2) Use the user-uploaded logo (brand-icon.webp) for all bot branding.
+
+Work Log:
+- Stopped the local bot.
+- Copied user-uploaded logo from /home/z/my-project/upload/260EB17E-3BED-4EDD-841C-C6527687ACEF.webp to mini-services/icbs-ticket-bot/brand-icon.webp (38KB, 1103x712 webp).
+- Added per-category modal field configuration (CATEGORY_MODAL_FIELDS) with tailored fields for each of the 5 ticket types:
+  • General Support: "What do you need help with?" (short) + "Describe your issue in detail" (paragraph)
+  • Bug Report: "Bug title" + "Steps to reproduce" + "What did you expect?" + "What actually happened?"
+  • Billing / Nitro: "Transaction/Order ID" + "Describe the billing issue" + "Account email (optional)"
+  • Partnership: "Your server/community name" + "Approximate member count" + "Server invite link" + "Why do you want to partner with us?"
+  • Appeal a Ban: "Your Discord username" + "Why were you banned?" + "Why should we unban you?"
+- Added ModalField interface and modalFieldsForCategory() helper.
+- Refactored handlePanelSelect: now ONLY validates cooldown + open ticket limit, then shows the category-specific modal (no channel creation yet). Modal customId is `ticket_open_modal_{categoryId}`.
+- Added createTicketFromModal function: handles the modal submit. Re-validates cooldown/limit (in case user opened another ticket while modal was open), extracts the form answers, creates the ticket channel, posts the opening embed with a new "📝 Your Submission" field showing all the user's answers, DMs opener, logs to log channel.
+- Updated handleModalSubmit to dispatch BOTH `ticket_open_modal_*` (new) and `ticket_close_modal_*` (existing close-reason modal). Removed the old standalone handleModalSubmit that only handled close-reason.
+- Added GET /brand-icon.webp HTTP endpoint: serves the logo file with Content-Type: image/webp, Cache-Control: public max-age=86400, Access-Control-Allow-Origin: *. Also responds at /logo.webp and /icon.webp aliases for convenience.
+- Added ICBS_PUBLIC_URL env var. Updated BRAND_ICON logic: priority is (1) ICBS_BRAND_ICON_URL if explicitly set, (2) {ICBS_PUBLIC_URL}/brand-icon.webp if PUBLIC_URL is set, (3) Discord default avatar fallback.
+- Updated startup log to list the new /brand-icon.webp endpoint, show the resolved brand icon URL, and warn if ICBS_PUBLIC_URL is not set.
+- Updated render.yaml: added ICBS_PUBLIC_URL env var with question-style description ("Q: What is the public URL of this Render web service? (for the logo)"). Updated ICBS_BRAND_ICON_URL description to clarify it overrides the bundled logo.
+- Wrote scripts/start-bot-with-logo.sh to start the bot fully detached (setsid) with ICBS_PUBLIC_URL=http://localhost:3040.
+- Tested locally:
+  * Bot serves /brand-icon.webp correctly (HTTP 200, Content-Type: image/webp, 38088 bytes, verified as RIFF/webp).
+  * /health confirms mode=live, ready=true.
+  * Posted enhanced panel (messageId 1533214729516879973).
+  * Verified via Discord API fetch: author icon, footer icon, AND thumbnail ALL now point to http://localhost:3040/brand-icon.webp (will be https://icbs-ticket-bot.onrender.com/brand-icon.webp on Render).
+  * Panel still shows 5 categories (no Staff Application).
+- Committed 5 files (+416 / -31) including the 38KB brand-icon.webp and pushed to GitHub. Verified the logo file is in the repo via GitHub API.
+
+Stage Summary:
+- ✅ Per-category modals: each ticket type now shows its own form with tailored fields before the ticket is created.
+- ✅ Form answers are included in the ticket-opening embed as a "📝 Your Submission" field, so staff see the user's input immediately.
+- ✅ ICBS logo (brand-icon.webp) is bundled with the bot, served at /brand-icon.webp, and used as the embed author icon, footer icon, AND thumbnail.
+- ✅ New ICBS_PUBLIC_URL env var lets the bot construct the absolute URL Discord needs.
+- ✅ All changes pushed to https://github.com/worldguy36/ICBS-Ticket-Bot
+- IMPORTANT for the user: when deploying on Render, set ICBS_PUBLIC_URL=https://icbs-ticket-bot.onrender.com (or your chosen subdomain) so Discord can fetch the logo. If you leave it empty, embeds fall back to Discord's default avatar.
