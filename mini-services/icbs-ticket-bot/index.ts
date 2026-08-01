@@ -529,6 +529,41 @@ client.on(Events.MessageCreate, async (msg) => {
   // Don't save on every message — periodic save below
 });
 
+// When a ticket channel is deleted (manually by staff OR by the bot itself),
+// mark the ticket as closed so it doesn't show up as "open" forever.
+client.on(Events.ChannelDelete, async (channel) => {
+  if (!channel.guild) return;
+  const t = ticketByChannel(channel.id);
+  if (!t) return;
+  // Only act if the ticket is still marked open (the bot's own close flow
+  // already handles state — this catches manual staff deletions).
+  if (t.status === 'closed') return;
+  console.log(`[ticket-bot] 🗑️ Ticket channel #${channel.name} was deleted externally — marking ticket #${t.id} as closed.`);
+  t.status = 'closed';
+  t.closedAt = Date.now();
+  t.closerId = null;
+  t.closerTag = 'channel deleted (external)';
+  t.closeReason = 'Channel deleted manually (no transcript generated).';
+  t.channelId = null;
+  t.reopenWindowUntil = null;
+  saveState();
+
+  // Log it
+  const logEmbed = brandEmbed()
+    .setTitle(`🗑️ Ticket #${t.id} Channel Deleted`)
+    .setColor(0x2b2b2b)
+    .setThumbnail(BRAND_ICON)
+    .setDescription(`The channel for ticket #${t.id} was deleted (manually or externally). The ticket has been auto-marked as closed. No transcript was generated.`)
+    .addFields(
+      { name: '👤 Opener', value: `<@${t.openerId}>\n\`${t.openerTag}\``, inline: true },
+      { name: '📂 Category', value: t.categoryLabel, inline: true },
+      { name: '⏰ Opened at', value: `<t:${Math.floor(t.openedAt / 1000)}:F>`, inline: true },
+      { name: '📋 Claimed by', value: t.claimedByTag ? `\`${t.claimedByTag}\`` : '— *unclaimed* —', inline: true },
+      { name: '💬 Messages', value: String(t.messageCount), inline: true },
+    );
+  await sendToLogChannel(channel.guild, { embeds: [logEmbed] });
+});
+
 setInterval(() => {
   saveState();
 }, 15_000).unref();
@@ -542,6 +577,41 @@ async function registerSlashCommands() {
     new SlashCommandBuilder()
       .setName('ticket-stats')
       .setDescription('Show ticket statistics (staff only).')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ticket-panel')
+      .setDescription('Post the ticket panel in THIS channel (admin only).')
+      .addStringOption((opt) =>
+        opt.setName('title').setDescription('Custom title for the panel embed.').setRequired(false),
+      )
+      .addStringOption((opt) =>
+        opt.setName('description').setDescription('Custom description for the panel.').setRequired(false),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ticket-close')
+      .setDescription('Close a ticket by its ID (admin only). Works from any channel.')
+      .addIntegerOption((opt) =>
+        opt.setName('id').setDescription('The ticket ID number (e.g. 5 for #5).').setRequired(true),
+      )
+      .addStringOption((opt) =>
+        opt.setName('reason').setDescription('Reason for closing (shown in logs + DM).').setRequired(false),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ticket-add')
+      .setDescription('Add a user to the current ticket channel (admin only).')
+      .addUserOption((opt) =>
+        opt.setName('user').setDescription('The user to add to this ticket.').setRequired(true),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ticket-help')
+      .setDescription('Show all ticket bot commands (staff only).')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
       .toJSON(),
   ];
@@ -571,9 +641,22 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       return;
     }
     if (interaction.isChatInputCommand()) {
-      if (interaction.commandName === 'ticket-stats') {
-        await handleStatsCommand(interaction);
-        return;
+      switch (interaction.commandName) {
+        case 'ticket-stats':
+          await handleStatsCommand(interaction);
+          return;
+        case 'ticket-panel':
+          await handlePanelCommand(interaction);
+          return;
+        case 'ticket-close':
+          await handleCloseCommand(interaction);
+          return;
+        case 'ticket-add':
+          await handleAddCommand(interaction);
+          return;
+        case 'ticket-help':
+          await handleHelpCommand(interaction);
+          return;
       }
     }
   } catch (err) {
@@ -1286,14 +1369,25 @@ async function buildTranscript(
   lines.push('');
 
   try {
-    const messages = await channel.messages.fetch({ limit: 100 });
+    // Fetch up to 500 messages (5 pages of 100) so longer tickets are fully captured.
+    const allMessages: Message[] = [];
+    let lastId: string | undefined;
+    for (let page = 0; page < 5; page++) {
+      const batch = await channel.messages.fetch({ limit: 100, before: lastId });
+      if (batch.size === 0) break;
+      allMessages.push(...batch.values());
+      lastId = batch.last()?.id;
+      if (batch.size < 100) break;
+    }
     // oldest first
-    const ordered = [...messages.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+    const ordered = allMessages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+    lines.push(`(Showing ${ordered.length} messages)\n`);
     for (const m of ordered) {
       if (m.author.bot && m.author.id === client.user?.id && m.embeds.length > 0 && m.embeds[0].title?.startsWith('🎫 Ticket')) {
         continue; // skip the ticket-opening embed itself
       }
       const time = new Date(m.createdTimestamp).toISOString().slice(11, 19); // HH:MM:SS
+      const date = new Date(m.createdTimestamp).toISOString().slice(0, 10); // YYYY-MM-DD
       const author = m.author.bot ? `${m.author.tag} [BOT]` : m.author.tag;
       let body = m.content || '';
       if (m.attachments.size > 0) {
@@ -1303,7 +1397,7 @@ async function buildTranscript(
       if (m.embeds.length > 0) {
         body = body ? `${body}\n  [embed: ${m.embeds[0].title || m.embeds[0].description?.slice(0, 80) || '(no title)'}]` : `[embed: ${m.embeds[0].title || m.embeds[0].description?.slice(0, 80) || '(no title)'}]`;
       }
-      lines.push(`[${time}] ${author}: ${body}`);
+      lines.push(`[${date} ${time}] ${author}: ${body}`);
     }
   } catch (err) {
     lines.push('⚠️ Could not fetch message history for transcript.');
@@ -1326,6 +1420,285 @@ function formatDuration(ms: number): string {
   if (h > 0) return `${h}h ${m % 60}m`;
   if (m > 0) return `${m}m ${s % 60}s`;
   return `${s}s`;
+}
+
+// ---------------------------------------------------------------------------
+// /ticket-panel slash command — post the panel in the CURRENT channel
+// ---------------------------------------------------------------------------
+async function handlePanelCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guild || !interaction.channel) {
+    await interaction.reply({ content: '⚠️ This command can only be used in a server text channel.', ephemeral: true });
+    return;
+  }
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!isStaff(member)) {
+    await interaction.reply({ content: '🚫 Only staff can use this command.', ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const title = interaction.options.getString('title') || undefined;
+  const description = interaction.options.getString('description') || undefined;
+
+  const result = await setupPanel({
+    title,
+    description,
+    targetChannelId: interaction.channelId,
+  });
+
+  if (result.ok) {
+    await interaction.editReply({
+      content: `✅ **Ticket panel posted in <#${result.channelId}>.**\n\nMessage ID: \`${result.messageId}\`\n\nUsers can now select a category to open a ticket.`,
+    });
+  } else {
+    await interaction.editReply({ content: `❌ Failed to post panel: ${result.error}` });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// /ticket-close slash command — close any ticket by ID
+// ---------------------------------------------------------------------------
+async function handleCloseCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guild) return;
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!isStaff(member)) {
+    await interaction.reply({ content: '🚫 Only staff can use this command.', ephemeral: true });
+    return;
+  }
+
+  const ticketId = interaction.options.getInteger('id', true);
+  const reason = interaction.options.getString('reason');
+  const ticket = state.tickets.find((t) => t.id === ticketId);
+
+  if (!ticket) {
+    await interaction.reply({ content: `⚠️ Ticket #${ticketId} not found.`, ephemeral: true });
+    return;
+  }
+
+  if (ticket.status === 'closed') {
+    await interaction.reply({ content: `⚠️ Ticket #${ticketId} is already closed.`, ephemeral: true });
+    return;
+  }
+
+  if (!ticket.channelId) {
+    // Channel already deleted — just mark as closed
+    ticket.status = 'closed';
+    ticket.closedAt = Date.now();
+    ticket.closerId = interaction.user.id;
+    ticket.closerTag = interaction.user.tag;
+    ticket.closeReason = reason;
+    saveState();
+    await interaction.reply({ content: `✅ Ticket #${ticketId} marked as closed (channel was already deleted).` });
+    return;
+  }
+
+  await interaction.deferReply();
+
+  // Fetch the channel + fake a ButtonInteraction-like object for closeTicket
+  try {
+    const channel = await interaction.guild.channels.fetch(ticket.channelId);
+    if (!channel || !channel.isTextBased()) {
+      await interaction.editReply({ content: `⚠️ Ticket #${ticketId}'s channel is gone or not text.` });
+      return;
+    }
+    await closeTicketFromCommand(interaction, ticket, channel as TextChannel, reason);
+  } catch (err: any) {
+    await interaction.editReply({ content: `❌ Failed to close ticket: ${err?.message || err}` });
+  }
+}
+
+// Helper: closeTicket variant that works from a ChatInputCommandInteraction
+// (closeTicket expects a ButtonInteraction/ModalSubmitInteraction with a channel)
+async function closeTicketFromCommand(
+  interaction: ChatInputCommandInteraction,
+  ticket: TicketRecord,
+  channel: TextChannel,
+  reason: string | null,
+) {
+  const now = Date.now();
+  const cat = categoryById(ticket.categoryId);
+
+  // Build transcript
+  const transcript = await buildTranscript(channel, ticket, interaction.user, reason);
+  const attachment = new AttachmentBuilder(Buffer.from(transcript.content, 'utf-8'), {
+    name: `transcript-${ticket.id}.txt`,
+  });
+
+  ticket.closedAt = now;
+  ticket.closerId = interaction.user.id;
+  ticket.closerTag = interaction.user.tag;
+  ticket.closeReason = reason;
+  ticket.status = 'closed';
+  ticket.reopenWindowUntil = null;
+  saveState();
+
+  // DM the opener
+  const opener = await client.users.fetch(ticket.openerId).catch(() => null);
+  const dmEmbed = brandEmbed()
+    .setTitle(`🔒 Ticket #${ticket.id} Closed`)
+    .setDescription(
+      [
+        `Your support ticket in **${interaction.guild!.name}** has been closed by a staff member.`,
+        '',
+        '📄 **A transcript of your ticket is attached** — keep it for your records.',
+        '',
+        'If you need further help, feel free to open a new ticket from the support panel.',
+      ].join('\n'),
+    )
+    .setColor(cat?.color || 0x4b4b4b)
+    .setThumbnail(BRAND_ICON)
+    .addFields(
+      { name: '📂 Category', value: `${cat?.emoji || '🎫'} ${cat?.label || ticket.categoryLabel}`, inline: true },
+      { name: '🔨 Closed by', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+      { name: '⏱️ Duration', value: formatDuration(now - ticket.openedAt), inline: true },
+      { name: '💬 Messages', value: String(ticket.messageCount), inline: true },
+      ...(reason ? [{ name: '📝 Close Reason', value: reason, inline: false }] : []),
+    );
+  await safeDm(opener, dmEmbed, [attachment]);
+
+  // Log channel
+  const logEmbed = brandEmbed()
+    .setTitle(`🔒 Ticket #${ticket.id} Closed`)
+    .setColor(0x2b2b2b)
+    .setThumbnail(BRAND_ICON)
+    .setDescription(`Ticket closed via \`/ticket-close\` command. Transcript attached.`)
+    .addFields(
+      { name: '👤 Opener', value: `<@${ticket.openerId}>\n\`${ticket.openerTag}\``, inline: true },
+      { name: '🔨 Closed by', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+      { name: '📋 Claimed by', value: ticket.claimedByTag ? `<@${ticket.claimedById}>\n\`${ticket.claimedByTag}\`` : '— *unclaimed* —', inline: true },
+      { name: '📂 Category', value: `${cat?.emoji || '🎫'} ${cat?.label || ticket.categoryLabel}`, inline: true },
+      { name: '⏱️ Duration', value: formatDuration(now - ticket.openedAt), inline: true },
+      { name: '💬 Messages', value: String(ticket.messageCount), inline: true },
+      ...(reason ? [{ name: '📝 Close Reason', value: reason, inline: false }] : []),
+    );
+  await sendToLogChannel(interaction.guild, { embeds: [logEmbed], files: [attachment] });
+
+  // Countdown + delete
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xe74c3c)
+        .setDescription(`⚠️ **This ticket has been closed by <@${interaction.user.id}> via \`/ticket-close\`. Channel will be deleted in 5 seconds…**`)
+        .setFooter({ text: 'Transcript has been saved and sent to the opener.' }),
+    ],
+  });
+  await sleep(1000);
+  await channel.send('⏳ **4…**');
+  await sleep(1000);
+  await channel.send('⏳ **3…**');
+  await sleep(1000);
+  await channel.send('⏳ **2…**');
+  await sleep(1000);
+  await channel.send('⏳ **1…**');
+  await sleep(1000);
+
+  try {
+    await channel.delete(`Ticket #${ticket.id} closed via /ticket-close by ${interaction.user.tag}`);
+  } catch (err) {
+    console.warn('[ticket-bot] channel delete failed:', err);
+  }
+  ticket.channelId = null;
+  saveState();
+
+  await interaction.editReply({ content: `✅ **Ticket #${ticket.id} closed.** Channel deleted, transcript sent to opener + log channel.` });
+}
+
+// ---------------------------------------------------------------------------
+// /ticket-add slash command — add a user to the current ticket channel
+// ---------------------------------------------------------------------------
+async function handleAddCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guild || !interaction.channel) {
+    await interaction.reply({ content: '⚠️ This command can only be used in a server text channel.', ephemeral: true });
+    return;
+  }
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!isStaff(member)) {
+    await interaction.reply({ content: '🚫 Only staff can use this command.', ephemeral: true });
+    return;
+  }
+
+  const ticket = ticketByChannel(interaction.channelId);
+  if (!ticket) {
+    await interaction.reply({ content: '⚠️ This command can only be used inside a ticket channel.', ephemeral: true });
+    return;
+  }
+
+  const userToAdd = interaction.options.getUser('user', true);
+  const channel = interaction.channel as TextChannel;
+
+  try {
+    await channel.permissionOverwrites.edit(userToAdd.id, {
+      ViewChannel: true,
+      SendMessages: true,
+      ReadMessageHistory: true,
+      AttachFiles: true,
+      EmbedLinks: true,
+    });
+    await interaction.reply({
+      content: `✅ <@${userToAdd.id}> (\`${userToAdd.tag}\`) has been added to this ticket by <@${interaction.user.id}>.`,
+      allowedMentions: { users: [userToAdd.id] },
+    });
+  } catch (err: any) {
+    await interaction.reply({ content: `❌ Failed to add user: ${err?.message || err}`, ephemeral: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// /ticket-help slash command — list all commands
+// ---------------------------------------------------------------------------
+async function handleHelpCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guild) return;
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!isStaff(member)) {
+    await interaction.reply({ content: '🚫 Only staff can use this command.', ephemeral: true });
+    return;
+  }
+
+  const embed = brandEmbed()
+    .setTitle('📖 Ticket Bot Commands')
+    .setColor(0x4b4b4b)
+    .setThumbnail(BRAND_ICON)
+    .setDescription(`Here are all the staff commands available for **${BRAND_TICKET}**.`)
+    .addFields(
+      {
+        name: '🎫 `/ticket-panel`',
+        value: 'Post the ticket panel in the **current channel**. Optional: `title` and `description` parameters to customise.',
+        inline: false,
+      },
+      {
+        name: '📊 `/ticket-stats`',
+        value: 'Show ticket statistics: total, open, closed, average close time, per-category breakdown.',
+        inline: false,
+      },
+      {
+        name: '🔒 `/ticket-close`',
+        value: 'Close any ticket by its ID number. Works from ANY channel. Optional: `reason` parameter.\nExample: `/ticket-close id:5 reason:"Issue resolved"`',
+        inline: false,
+      },
+      {
+        name: '➕ `/ticket-add`',
+        value: 'Add a user to the **current ticket channel**. Run inside a ticket channel.\nExample: `/ticket-add user:@someone`',
+        inline: false,
+      },
+      {
+        name: '📖 `/ticket-help`',
+        value: 'Show this help message.',
+        inline: false,
+      },
+      {
+        name: '📋 Button Actions (in ticket channels)',
+        value: [
+          '• **📋 Claim Ticket** — claim the ticket (staff only).',
+          '• **🔒 Close Ticket** — close immediately (staff or opener).',
+          '• **🔴 Close + Reason** — close with a reason modal (staff only).',
+          '• **↩️ Reopen Ticket** — reopen within 60s of closing (staff only).',
+        ].join('\n'),
+        inline: false,
+      },
+    );
+
+  await interaction.reply({ embeds: [embed], ephemeral: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -1398,12 +1771,14 @@ async function setupPanel(opts: {
   title?: string;
   description?: string;
   categories?: Array<Partial<Category> & { id: string }>;
+  targetChannelId?: string; // override PANEL_CHANNEL_ID (used by /ticket-panel slash command)
 }): Promise<{ ok: boolean; messageId?: string; channelId?: string; error?: string }> {
   if (DEMO_MODE) {
     return { ok: false, error: 'Bot is in demo mode (no DISCORD_BOT_TOKEN).' };
   }
   if (!guild) return { ok: false, error: 'Guild not resolved.' };
-  if (!PANEL_CHANNEL_ID) return { ok: false, error: 'TICKET_PANEL_CHANNEL_ID not set. Configure it in your Render environment variables.' };
+  const targetChannelId = opts.targetChannelId || PANEL_CHANNEL_ID;
+  if (!targetChannelId) return { ok: false, error: 'No target channel — set TICKET_PANEL_CHANNEL_ID or use /ticket-panel in a channel.' };
 
   // Optionally replace categories
   if (Array.isArray(opts.categories) && opts.categories.length > 0) {
@@ -1488,9 +1863,9 @@ async function setupPanel(opts: {
   const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
 
   try {
-    const channel = await guild.channels.fetch(PANEL_CHANNEL_ID);
+    const channel = await guild.channels.fetch(targetChannelId);
     if (!channel || channel.type !== ChannelType.GuildText) {
-      return { ok: false, error: 'Panel channel not found or not a text channel.' };
+      return { ok: false, error: 'Target channel not found or not a text channel.' };
     }
     const msg = await (channel as TextChannel).send({ embeds: [embed], components: [row] });
     state.panelMessageId = msg.id;
