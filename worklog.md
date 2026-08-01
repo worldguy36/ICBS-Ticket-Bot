@@ -149,3 +149,49 @@ Stage Summary:
 - ✅ All changes tested locally and pushed to https://github.com/worldguy36/ICBS-Ticket-Bot
 - ✅ Bot is running locally (live mode, panel posted) while user sets up Render
 - Next step for the user: go to https://dashboard.render.com/blueprints → New Blueprint Instance → select worldguy36/ICBS-Ticket-Bot → enter DISCORD_BOT_TOKEN + ICBS_WEBHOOK_SECRET when prompted → click Apply. Service will be live at https://icbs-ticket-bot.onrender.com within ~1 min.
+
+---
+Task ID: 4
+Agent: Super Z (main)
+Task: Make all env vars (channels, ticket category, mod roles, etc.) configurable through Render's environment variable UI.
+
+Work Log:
+- Stopped the local bot to safely modify index.ts.
+- Added a new `POST /setup-guild` HTTP endpoint to the bot:
+  * Auth: x-icbs-secret header (same as /setup-panel).
+  * Body (all optional): { categoryName, panelChannelName, logsChannelName, adminRoleName, staffRoleName, postPanel, title, description, categories }
+  * Behavior: fetches all existing channels + roles from the guild, then for each of the 5 required resources (category, panel channel, logs channel, admin role, staff role) either REUSES an existing one matched by name or CREATES a new one.
+  * Returns: { ok, created: [...], reused: [...], ids: { TICKET_CATEGORY_ID, TICKET_PANEL_CHANNEL_ID, TICKET_LOG_CHANNEL_ID, TICKET_ADMIN_ROLE_ID, TICKET_STAFF_ROLE_IDS }, panel?: { ok, messageId, channelId } }
+  * If postPanel:true is set, also posts the ticket panel immediately after creating the channel.
+- Refactored setupPanel into setupPanelWithIds(panelChannelId, opts) so /setup-guild can post to a just-created channel even when the TICKET_PANEL_CHANNEL_ID env var isn't set yet.
+- Added a clear CONFIGURATION REPORT to the bot's ClientReady handler:
+  * Prints ✅ or ⚠️ for each of the 8 env vars with the var name, set/NOT SET status, and a hint explaining what it does.
+  * If any channel/role IDs are missing, prints a tip pointing to POST /setup-guild with a ready-to-copy curl command.
+- Updated the HTTP server startup log to list all 5 endpoints (/, /ping, /health, /setup-guild, /setup-panel).
+- Rewrote render.yaml:
+  * Changed ALL config env vars to `sync: false` — Render now prompts for each one in the dashboard UI instead of having hardcoded IDs baked in.
+  * Added descriptive comments for every var: what it is, how to find the value in Discord (right-click → Copy ID), and an example.
+  * Documented TWO setup paths at the top of the file:
+    - Path A (minimal/auto-setup): enter only DISCORD_BOT_TOKEN + DISCORD_GUILD_ID + ICBS_WEBHOOK_SECRET. Leave the rest empty. After deploy, call POST /setup-guild once to auto-create the channels + roles. Paste the returned IDs back into Render's env vars for persistence.
+    - Path B (manual): enter ALL the env vars with IDs copied from Discord.
+- Wrote scripts/test-auto-setup.sh to verify the auto-setup flow end-to-end.
+- Ran the test:
+  * Created a temporary .env with ONLY the 3 required vars (token, guild, secret) — all channel/role IDs left empty.
+  * Bot started successfully on port 3042.
+  * Config report correctly showed 5 vars as NOT SET with the /setup-guild tip.
+  * /health returned mode=live, ready=true, but configured.panelChannel=false, logChannel=false, etc. (as expected).
+  * POST /setup-guild returned ok=true, reused all 5 existing resources (category, 2 channels, 2 roles), and returned all 5 IDs.
+  * With postPanel:true, also posted the ticket panel — got messageId 1533134579513294909.
+  * Test cleaned up and restored the original .env.
+- Committed 3 files (+420 / -25) and pushed to GitHub.
+- Restarted the local bot in live mode (port 3040) — confirmed mode=live, ready=true, panel=posted.
+
+Stage Summary:
+- ✅ All env vars are now `sync: false` in render.yaml — Render prompts for each one in the dashboard UI.
+- ✅ New POST /setup-guild endpoint auto-creates Discord resources if env vars are empty.
+- ✅ Bot prints a clear config report on startup showing what's set and what's missing.
+- ✅ Two setup paths documented: minimal (3 vars + auto-setup call) or manual (all vars from Discord).
+- ✅ Tested locally: bot starts with only 3 vars, /setup-guild creates/reuses resources and posts panel.
+- ✅ All changes pushed to https://github.com/worldguy36/ICBS-Ticket-Bot
+- ✅ Local bot running again (live mode, panel posted).
+- Next step for the user: deploy on Render via Blueprint — enter only the 3 required vars (or all of them if you prefer manual), then optionally call /setup-guild to auto-create any missing Discord resources.
