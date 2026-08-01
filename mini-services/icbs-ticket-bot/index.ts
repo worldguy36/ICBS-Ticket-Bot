@@ -64,8 +64,17 @@ const STATE_FILE = path.join(__dirname, 'tickets.json');
 const BRAND = '𝑇ℎ𝑒 𝐼𝐶𝐵𝑆';
 const BRAND_TICKET = '𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 𝑇𝑖𝑐𝑘𝑒𝑡 𝐵𝑜𝑡';
 const FOOTER = '𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 — Support Delivered';
+// Public URL of the bot service (set on Render). Used to serve the local
+// brand-icon.webp file as the embed thumbnail/author icon.
+const PUBLIC_URL = (process.env.ICBS_PUBLIC_URL || '').replace(/\/+$/, '');
+
+// Brand icon — priority:
+//   1. ICBS_BRAND_ICON_URL env var (if set explicitly)
+//   2. {ICBS_PUBLIC_URL}/brand-icon.webp (served by this bot's HTTP server)
+//   3. Discord default avatar fallback
 const BRAND_ICON =
   process.env.ICBS_BRAND_ICON_URL ||
+  (PUBLIC_URL ? `${PUBLIC_URL}/brand-icon.webp` : '') ||
   'https://cdn.discordapp.com/embed/avatars/0.png';
 
 // ---------------------------------------------------------------------------
@@ -154,6 +163,167 @@ let categories: Category[] = [...DEFAULT_CATEGORIES];
 
 function categoryStaffRoleId(cat: Category): string | undefined {
   return cat.staffRoleId || categoryRoles[cat.id] || STAFF_ROLE_IDS[0];
+}
+
+// ---------------------------------------------------------------------------
+// Per-category modal field configuration
+// ---------------------------------------------------------------------------
+// When a user picks a category from the panel, the bot shows a Discord MODAL
+// with the fields defined here. Each category has its own set of fields
+// relevant to that ticket type. Discord allows max 5 fields per modal.
+interface ModalField {
+  customId: string;       // unique within the modal
+  label: string;          // shown above the input (max 45 chars)
+  style: TextInputStyle; // Short (1-line) or Paragraph (multi-line)
+  required: boolean;
+  placeholder?: string;
+  minLength?: number;
+  maxLength?: number;
+}
+
+const CATEGORY_MODAL_FIELDS: Record<string, ModalField[]> = {
+  general: [
+    {
+      customId: 'subject',
+      label: 'What do you need help with?',
+      style: TextInputStyle.Short,
+      required: true,
+      placeholder: 'Brief subject line, e.g. "Can\'t verify my account"',
+      maxLength: 100,
+    },
+    {
+      customId: 'description',
+      label: 'Describe your issue in detail',
+      style: TextInputStyle.Paragraph,
+      required: true,
+      placeholder: 'Include any error messages, what you were doing when it happened, and what you\'ve already tried.',
+      maxLength: 1500,
+    },
+  ],
+  bug: [
+    {
+      customId: 'bug_title',
+      label: 'Bug title',
+      style: TextInputStyle.Short,
+      required: true,
+      placeholder: 'Short summary of the bug, e.g. "Bot crashes on /ticket-stats"',
+      maxLength: 100,
+    },
+    {
+      customId: 'steps',
+      label: 'Steps to reproduce',
+      style: TextInputStyle.Paragraph,
+      required: true,
+      placeholder: '1. ...\n2. ...\n3. ...\nWhat steps cause the bug to happen?',
+      maxLength: 1000,
+    },
+    {
+      customId: 'expected',
+      label: 'What did you expect to happen?',
+      style: TextInputStyle.Short,
+      required: false,
+      placeholder: 'What SHOULD have happened?',
+      maxLength: 200,
+    },
+    {
+      customId: 'actual',
+      label: 'What actually happened?',
+      style: TextInputStyle.Short,
+      required: false,
+      placeholder: 'What did happen instead?',
+      maxLength: 200,
+    },
+  ],
+  billing: [
+    {
+      customId: 'transaction_id',
+      label: 'Transaction / Order ID',
+      style: TextInputStyle.Short,
+      required: true,
+      placeholder: 'From your Discord billing or payment receipt',
+      maxLength: 100,
+    },
+    {
+      customId: 'issue',
+      label: 'Describe the billing issue',
+      style: TextInputStyle.Paragraph,
+      required: true,
+      placeholder: 'What\'s wrong with the charge / subscription / Nitro / boost?',
+      maxLength: 1000,
+    },
+    {
+      customId: 'email',
+      label: 'Account email (optional)',
+      style: TextInputStyle.Short,
+      required: false,
+      placeholder: 'The email on your Discord account',
+      maxLength: 200,
+    },
+  ],
+  partnership: [
+    {
+      customId: 'server_name',
+      label: 'Your server / community name',
+      style: TextInputStyle.Short,
+      required: true,
+      placeholder: 'e.g. "Gaming Hub"',
+      maxLength: 100,
+    },
+    {
+      customId: 'member_count',
+      label: 'Approximate member count',
+      style: TextInputStyle.Short,
+      required: true,
+      placeholder: 'e.g. "1500"',
+      maxLength: 20,
+    },
+    {
+      customId: 'invite_link',
+      label: 'Server invite link',
+      style: TextInputStyle.Short,
+      required: true,
+      placeholder: 'discord.gg/xxxx or full URL',
+      maxLength: 200,
+    },
+    {
+      customId: 'why_partner',
+      label: 'Why do you want to partner with us?',
+      style: TextInputStyle.Paragraph,
+      required: true,
+      placeholder: 'Tell us about your community and what you bring to a partnership.',
+      maxLength: 1000,
+    },
+  ],
+  appeal: [
+    {
+      customId: 'username',
+      label: 'Your Discord username',
+      style: TextInputStyle.Short,
+      required: true,
+      placeholder: 'e.g. worldguy36',
+      maxLength: 100,
+    },
+    {
+      customId: 'ban_reason',
+      label: 'Why were you banned? (your best guess)',
+      style: TextInputStyle.Paragraph,
+      required: true,
+      placeholder: 'If you don\'t know, write "Not sure".',
+      maxLength: 500,
+    },
+    {
+      customId: 'appeal_text',
+      label: 'Why should we unban you?',
+      style: TextInputStyle.Paragraph,
+      required: true,
+      placeholder: 'Make your case. Apologise if appropriate. Explain what\'s changed.',
+      maxLength: 1500,
+    },
+  ],
+};
+
+function modalFieldsForCategory(catId: string): ModalField[] {
+  return CATEGORY_MODAL_FIELDS[catId] || CATEGORY_MODAL_FIELDS.general;
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +606,7 @@ async function handlePanelSelect(interaction: StringSelectMenuInteraction) {
     return;
   }
 
-  // Cooldown check
+  // Cooldown check (fail fast — before showing the modal)
   const lastOpen = openCooldowns.get(userId) || 0;
   const now = Date.now();
   if (now - lastOpen < 60_000) {
@@ -456,6 +626,104 @@ async function handlePanelSelect(interaction: StringSelectMenuInteraction) {
       ephemeral: true,
     });
     return;
+  }
+
+  // Build + show the category-specific modal
+  const fields = modalFieldsForCategory(catId);
+  const modal = new ModalBuilder()
+    .setCustomId(`ticket_open_modal_${catId}`)
+    .setTitle(`${cat.emoji} ${cat.label}`);
+
+  for (const f of fields) {
+    const input = new TextInputBuilder()
+      .setCustomId(f.customId)
+      .setLabel(f.label)
+      .setStyle(f.style)
+      .setRequired(f.required);
+    if (f.placeholder) input.setPlaceholder(f.placeholder);
+    if (f.minLength !== undefined) input.setMinLength(f.minLength);
+    if (f.maxLength !== undefined) input.setMaxLength(f.maxLength);
+    modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+  }
+
+  await interaction.showModal(modal);
+}
+
+// ---------------------------------------------------------------------------
+// Modal submit — handles BOTH the ticket-open modal AND the close-reason modal
+// ---------------------------------------------------------------------------
+async function handleModalSubmit(interaction: ModalSubmitInteraction) {
+  if (!interaction.guild) return;
+
+  // --- Close-reason modal (existing) ---
+  if (interaction.customId.startsWith('ticket_close_modal_')) {
+    if (!interaction.channel) return;
+    const ticketId = Number(interaction.customId.replace('ticket_close_modal_', ''));
+    const ticket = state.tickets.find((t) => t.id === ticketId);
+    if (!ticket) {
+      await interaction.reply({ content: '⚠️ Ticket not found.', ephemeral: true });
+      return;
+    }
+    const reason = interaction.fields.getTextInputValue('close_reason').trim();
+    await closeTicket(interaction, ticket, reason);
+    return;
+  }
+
+  // --- Ticket-open modal (new) ---
+  if (interaction.customId.startsWith('ticket_open_modal_')) {
+    await createTicketFromModal(interaction);
+    return;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Create a ticket from a submitted modal
+// ---------------------------------------------------------------------------
+async function createTicketFromModal(interaction: ModalSubmitInteraction) {
+  if (!interaction.guild) return;
+  const userId = interaction.user.id;
+  const catId = interaction.customId.replace('ticket_open_modal_', '');
+  const cat = categoryById(catId);
+  if (!cat) {
+    await interaction.reply({ content: '⚠️ Unknown ticket category.', ephemeral: true });
+    return;
+  }
+
+  // Re-check cooldown (user might have opened another ticket while the modal was open)
+  const lastOpen = openCooldowns.get(userId) || 0;
+  const now = Date.now();
+  if (now - lastOpen < 60_000) {
+    const wait = Math.ceil((60_000 - (now - lastOpen)) / 1000);
+    await interaction.reply({
+      content: `⏳ You're opening tickets too quickly. Please wait **${wait}s** before opening another.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Re-check open ticket limit
+  const openCount = openTicketCountForUser(userId);
+  if (openCount >= 3) {
+    await interaction.reply({
+      content: `🚫 You already have **${openCount}** open tickets. Please close one before opening another.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Extract the form answers
+  const fields = modalFieldsForCategory(catId);
+  const answers: { label: string; value: string }[] = [];
+  for (const f of fields) {
+    let val: string;
+    try {
+      val = interaction.fields.getTextInputValue(f.customId).trim();
+    } catch {
+      val = '';
+    }
+    if (val || f.required) {
+      answers.push({ label: f.label, value: val || '_(not provided)_' });
+    }
   }
 
   await interaction.deferReply({ ephemeral: true });
@@ -504,6 +772,11 @@ async function handlePanelSelect(interaction: StringSelectMenuInteraction) {
   openCooldowns.set(userId, now);
   saveState();
 
+  // Build the submission summary for the embed
+  const submissionSummary = answers
+    .map((a) => `**${a.label}**\n${a.value}`)
+    .join('\n\n');
+
   // Build the opening embed + buttons (enhanced UI)
   const embed = brandEmbed()
     .setTitle(`🎫 Ticket #${ticket.id} — ${cat.emoji} ${cat.label}`)
@@ -511,7 +784,7 @@ async function handlePanelSelect(interaction: StringSelectMenuInteraction) {
       [
         `👋 **Welcome to your support ticket, <@${userId}>!**`,
         '',
-        `A member of the ${BRAND} staff team will be with you shortly. Please describe your issue in **as much detail as possible** — include screenshots, error messages, and steps to reproduce if applicable.`,
+        `A member of the ${BRAND} staff team will be with you shortly. Your submission details are below — feel free to add more context, screenshots, or follow-up info.`,
         '',
         `┌──────────────────────────────────────┐`,
         `│  🎫 **Ticket ID:** #${ticket.id}`,
@@ -530,13 +803,8 @@ async function handlePanelSelect(interaction: StringSelectMenuInteraction) {
         inline: false,
       },
       {
-        name: '💡 What to Do Next',
-        value: [
-          '1️⃣  Describe your issue in detail below.',
-          '2️⃣  Attach screenshots or files if helpful.',
-          '3️⃣  Wait for a staff member to claim the ticket.',
-          '4️⃣  Use the **🔒 Close** button when your issue is resolved.',
-        ].join('\n'),
+        name: '📝 Your Submission',
+        value: submissionSummary,
         inline: false,
       },
       {
@@ -613,6 +881,8 @@ async function handlePanelSelect(interaction: StringSelectMenuInteraction) {
 
   await interaction.editReply({ content: `✅ **Ticket opened:** ${channel}\n\n🎫 A private channel has been created for you. Check it out — our staff team has been notified.` });
 }
+
+
 
 function buildTicketPermissions(
   guild: Guild,
@@ -776,18 +1046,7 @@ async function showCloseReasonModal(interaction: ButtonInteraction, ticket: Tick
   await interaction.showModal(modal);
 }
 
-async function handleModalSubmit(interaction: ModalSubmitInteraction) {
-  if (!interaction.guild || !interaction.channel) return;
-  if (!interaction.customId.startsWith('ticket_close_modal_')) return;
-  const ticketId = Number(interaction.customId.replace('ticket_close_modal_', ''));
-  const ticket = state.tickets.find((t) => t.id === ticketId);
-  if (!ticket) {
-    await interaction.reply({ content: '⚠️ Ticket not found.', ephemeral: true });
-    return;
-  }
-  const reason = interaction.fields.getTextInputValue('close_reason').trim();
-  await closeTicket(interaction, ticket, reason);
-}
+// (handleModalSubmit is defined earlier — handles both ticket_open_modal_* and ticket_close_modal_*)
 
 // ---------------------------------------------------------------------------
 // Close ticket — generate transcript, post to log, DM opener, delete channel
@@ -1294,6 +1553,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // --- GET /brand-icon.webp  (the ICBS logo — used as embed thumbnail) ---
+  if (req.method === 'GET' && (pathname === '/brand-icon.webp' || pathname === '/logo.webp' || pathname === '/icon.webp')) {
+    const logoPath = path.join(__dirname, 'brand-icon.webp');
+    try {
+      const data = fs.readFileSync(logoPath);
+      res.writeHead(200, {
+        'Content-Type': 'image/webp',
+        'Cache-Control': 'public, max-age=86400',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.end(data);
+    } catch (err) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'brand-icon.webp not found on disk.' }));
+    }
+    return;
+  }
+
   // --- GET /health ---
   if (req.method === 'GET' && pathname === '/health') {
     const payload = {
@@ -1370,10 +1647,17 @@ const server = http.createServer(async (req, res) => {
 // (Render requires this — listening on localhost only won't pass health checks).
 server.listen(HTTP_PORT, '0.0.0.0', () => {
   console.log(`[ticket-bot] 🌐 HTTP server listening on http://0.0.0.0:${HTTP_PORT}`);
-  console.log(`[ticket-bot]    GET  /             (root health check — Render default)`);
-  console.log(`[ticket-bot]    GET  /ping         (lightweight, no auth)`);
-  console.log(`[ticket-bot]    GET  /health       (full status payload)`);
-  console.log(`[ticket-bot]    POST /setup-panel  (auth: x-icbs-secret — post the ticket panel)`);
+  console.log(`[ticket-bot]    GET  /                (root health check — Render default)`);
+  console.log(`[ticket-bot]    GET  /ping            (lightweight, no auth)`);
+  console.log(`[ticket-bot]    GET  /health          (full status payload)`);
+  console.log(`[ticket-bot]    GET  /brand-icon.webp (the ICBS logo — used as embed thumbnail)`);
+  console.log(`[ticket-bot]    POST /setup-panel    (auth: x-icbs-secret — post the ticket panel)`);
+  if (PUBLIC_URL) {
+    console.log(`[ticket-bot] 🎨 Brand icon URL: ${PUBLIC_URL}/brand-icon.webp`);
+  } else {
+    console.log(`[ticket-bot] ⚠️  ICBS_PUBLIC_URL not set — embeds will fall back to Discord default avatar.`);
+    console.log(`[ticket-bot]    Set ICBS_PUBLIC_URL to your Render URL (e.g. https://icbs-ticket-bot.onrender.com) to use the ICBS logo.`);
+  }
 });
 
 // ---------------------------------------------------------------------------

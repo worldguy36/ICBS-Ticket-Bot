@@ -160,16 +160,28 @@ services:
         # is only used for local development. Leave EMPTY on Render.
         # If running locally, set to 3040.
 
+      - key: ICBS_PUBLIC_URL
+        sync: false
+        # Q: What is the public URL of this Render web service? (for the logo)
+        #
+        # The bot serves its brand logo at /brand-icon.webp. To use it in
+        # Discord embeds (which require absolute URLs), the bot needs to know
+        # its own public URL. Enter your Render URL here.
+        #
+        # Format: https://icbs-ticket-bot.onrender.com
+        # (or whatever subdomain you chose when creating the service)
+        # Leave EMPTY to fall back to Discord's default avatar.
+
       - key: ICBS_BRAND_ICON_URL
         sync: false
-        # Q: What URL should be used as the embed icon? (optional)
+        # Q: What URL should be used as the embed icon? (optional — overrides the logo)
         #
-        # The bot's embeds show an icon in the author/footer area. If you
-        # have a custom logo URL, paste it here. Otherwise leave empty to
-        # use Discord's default avatar.
+        # By default, the bot uses {ICBS_PUBLIC_URL}/brand-icon.webp (the logo
+        # bundled with the bot). If you want to use a DIFFERENT icon hosted
+        # elsewhere, paste its URL here. Otherwise leave EMPTY.
         #
-        # Format: https://example.com/icbs-logo.png
-        # Leave EMPTY to use the default.
+        # Format: https://example.com/my-custom-logo.png
+        # Leave EMPTY to use the bundled ICBS logo served at /brand-icon.webp.
 
       - key: TICKET_CATEGORY_ROLES
         sync: false
