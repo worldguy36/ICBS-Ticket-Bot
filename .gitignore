@@ -1,2 +1,22 @@
-skills/
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# Build artifacts
 node_modules/
+
+# Local-only directories (sandbox state, not part of the project)
+skills/
+upload/
+download/
+
+# Bot runtime state
+mini-services/icbs-ticket-bot/tickets.json
+mini-services/icbs-ticket-bot/bun.lock
+
+# OS / editor noise
+.DS_Store
+*.log
+.vscode/
+.idea/
