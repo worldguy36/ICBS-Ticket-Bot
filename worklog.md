@@ -337,3 +337,35 @@ Stage Summary:
 - ✅ /status and /dashboard aliases for the HTML page.
 - ✅ All changes pushed to https://github.com/worldguy36/ICBS-Ticket-Bot
 - For UptimeRobot: set the monitor URL to https://icbs-ticket-bot.onrender.com/uptime (or /ping, or / — all return 200).
+
+---
+Task ID: 8
+Agent: Super Z (main)
+Task: (1) Improve the ticket bot system. (2) Add an admin slash command to post a panel to any channel.
+
+Work Log:
+- Stopped the local bot.
+- Added 5 slash commands (all staff-only, gated by ManageMessages permission):
+  1. /ticket-panel [title?] [description?] — posts the ticket panel in the CURRENT channel where the command is run. (Main feature request.)
+  2. /ticket-close <id> [reason?] — closes any ticket by its ID number, from ANY channel. Generates transcript, DMs opener, logs, deletes channel.
+  3. /ticket-add <user> — adds a user to the current ticket channel (grants View/Send/ReadHistory/Attach/Embed perms). Only works inside a ticket channel.
+  4. /ticket-help — shows an embed listing all 5 commands + the 4 button actions with descriptions and examples.
+  5. /ticket-stats — (existing) shows statistics embed.
+- Refactored setupPanel() to accept an optional targetChannelId parameter so /ticket-panel can post to any channel (not just the configured TICKET_PANEL_CHANNEL_ID). The HTTP /setup-panel endpoint still uses the env var.
+- Added closeTicketFromCommand() helper — a variant of closeTicket() that works from a ChatInputCommandInteraction (the existing closeTicket expects a ButtonInteraction/ModalSubmitInteraction with a channel). Reuses the same transcript + DM + log + countdown + delete flow.
+- Updated the interaction dispatcher to use a switch statement for cleaner command routing (was an if-chain).
+- Added ChannelDelete event handler: when a ticket channel is deleted manually by staff (or externally), the bot auto-marks the ticket as closed so it doesn't show up as 'open' forever. Logs to #ticket-logs with closer='channel deleted (external)' and reason='Channel deleted manually (no transcript generated).'
+- Improved transcript pagination: now fetches up to 500 messages (5 pages of 100) instead of just 100, so longer tickets are fully captured. Each message line now includes the date (YYYY-MM-DD) in addition to the time. Added a '(Showing N messages)' header.
+- Verified via Discord REST API that all 5 commands are registered in the guild:
+  /ticket-stats, /ticket-panel [title?,description?], /ticket-close [id,reason?], /ticket-add [user], /ticket-help.
+- Committed 3 files (+444 / -9) and pushed to GitHub. Render auto-deploys on push.
+
+Stage Summary:
+- ✅ /ticket-panel slash command: staff can now post the ticket panel in ANY channel by running the command there. Optional title + description params for customisation.
+- ✅ /ticket-close slash command: staff can close any ticket by ID from anywhere — no need to be in the ticket channel.
+- ✅ /ticket-add slash command: staff can add users to a ticket channel (for adding witnesses, other staff, etc.).
+- ✅ /ticket-help slash command: lists all commands + button actions in an embed.
+- ✅ ChannelDelete handler: manual channel deletions are now tracked (ticket marked closed, logged).
+- ✅ Transcript pagination: up to 500 messages captured (was 100).
+- ✅ All 5 slash commands verified registered in Discord.
+- ✅ Pushed to GitHub — Render auto-deploys.
