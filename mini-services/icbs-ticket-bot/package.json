@@ -1,0 +1,26 @@
+{
+  "name": "icbs-ticket-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The ICBS Ticket Bot — advanced Discord ticket system for the ICBS server. Mirrors the architecture of The ICBS Times news bot.",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts",
+    "start:node": "node --experimental-vm-modules index.ts"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "keywords": [
+    "discord",
+    "ticket-bot",
+    "icbs",
+    "support"
+  ],
+  "license": "UNLICENSED"
+}
