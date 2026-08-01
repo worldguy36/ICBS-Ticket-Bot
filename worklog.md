@@ -105,3 +105,47 @@ Stage Summary:
   3. Try `/ticket-stats` to see the stats embed.
   4. To stop the bot: `kill 1767`. To restart: `cd mini-services/icbs-ticket-bot && bun run dev`.
   5. For Render deployment: set the same env vars on the Render service and let the Next.js web app spawn it as a detached child (Option A in the bot README).
+
+---
+Task ID: 3
+Agent: Super Z (main)
+Task: Deploy the ICBS Ticket Bot on Render as a standalone web service (not as a detached child of a Next.js app).
+
+Work Log:
+- Stopped the previously-running bot (PID 1767) to safely modify index.ts.
+- Modified `mini-services/icbs-ticket-bot/index.ts`:
+  * Changed `HTTP_PORT` to read `process.env.PORT` first (Render sets this automatically), then fall back to `ICBS_BOT_PORT` (default 3040) for local dev. In detached-child mode, `ticket-client.ts` sets `PORT=undefined` in the child env, so this is safe.
+  * Added `GET /` endpoint — returns a tiny 200 JSON `{ ok, service, mode, ready, uptime }`. Render's default health check pings the root URL, so this ensures the service shows as "Live" without needing a custom Health Check Path.
+  * Added `GET /ping` endpoint — lightweight 200 JSON, for UptimeRobot.
+  * Changed `server.listen(HTTP_PORT)` to `server.listen(HTTP_PORT, '0.0.0.0', ...)` — Render requires binding to 0.0.0.0 (localhost-only fails health checks).
+  * Updated startup log to list all 4 endpoints.
+- Created root `package.json` with: deps (discord.js ^14.16.3, dotenv ^16.4.5), scripts (`start: bun mini-services/icbs-ticket-bot/index.ts`, `dev: bun --hot ...`), `engines.bun >= 1.1.0`. Render deploys from the repo root.
+- Ran `bun install` at root → generated `bun.lock` (5951 bytes, 23 packages) for reproducible installs.
+- Created `render.yaml` Blueprint:
+  * `type: web`, `runtime: bun`, `plan: free`, `region: oregon`
+  * `buildCommand: bun install`, `startCommand: bun mini-services/icbs-ticket-bot/index.ts`
+  * `healthCheckPath: /` (the new root endpoint)
+  * `autoDeploy: true`, `branch: main`
+  * Pre-filled env vars with discovered values (guild 1509170609760763964, panel channel 1533131440496316587, log channel 1533131442077302907, ticket category 1533131438587773021, admin role 1533130635131092995, staff role 1510013691515502843)
+  * Two `sync: false` secrets: DISCORD_BOT_TOKEN and ICBS_WEBHOOK_SECRET (user enters these in the Render dashboard)
+- Created `Dockerfile` as backup deploy method (uses `oven/bun:1.1` image, sets `ENV PORT=10000`, includes HEALTHCHECK).
+- Created `.dockerignore` (excludes .env, node_modules, tickets.json, .git, etc.).
+- Created `scripts/test-render-mode.sh` — verifies the bot works in Render mode.
+- Ran the test: bot started with `PORT=10000`, bound to `0.0.0.0:10000` (verified via `ss -tlnp`), all endpoints returned 200 (`/`, `/ping`, `/health`), `/setup-panel` properly 401'd without secret. ✅
+- Updated root `README.md`:
+  * Repo layout now shows root `package.json`, `render.yaml`, `Dockerfile`, `.dockerignore`, `bun.lock`, and the new scripts.
+  * New "Deployment on Render (as a Web Service)" section with 3 options: Blueprint (one-click), Manual dashboard setup, Docker fallback.
+  * Keep-alive instructions (UptimeRobot → `/ping` every 5 min).
+  * "Posting the ticket panel" + "Checking status" sections with curl commands.
+  * HTTP API table updated with `/` and `/ping` endpoints.
+- Committed 8 files (+407 / -13) and pushed to GitHub. Repo now has: `.dockerignore`, `.gitignore`, `Dockerfile`, `README.md`, `bun.lock`, `package.json`, `render.yaml`, plus the existing `mini-services/`, `scripts/`, `src/`, `worklog.md`.
+- Restarted the bot locally in live mode (still on port 3040) — confirmed `mode=live`, `ready=true`, `bot=ICBS Ticket Bot#1267`, panel still posted.
+
+Stage Summary:
+- ✅ Bot modified to support Render web service mode (PORT env, 0.0.0.0 binding, root / health endpoint)
+- ✅ Root `package.json` + `bun.lock` created for Render deployment
+- ✅ `render.yaml` Blueprint created with pre-filled env vars (one-click deploy)
+- ✅ `Dockerfile` + `.dockerignore` created as backup deploy method
+- ✅ All changes tested locally and pushed to https://github.com/worldguy36/ICBS-Ticket-Bot
+- ✅ Bot is running locally (live mode, panel posted) while user sets up Render
+- Next step for the user: go to https://dashboard.render.com/blueprints → New Blueprint Instance → select worldguy36/ICBS-Ticket-Bot → enter DISCORD_BOT_TOKEN + ICBS_WEBHOOK_SECRET when prompted → click Apply. Service will be live at https://icbs-ticket-bot.onrender.com within ~1 min.
