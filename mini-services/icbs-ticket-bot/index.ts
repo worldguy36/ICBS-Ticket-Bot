@@ -1502,6 +1502,342 @@ async function setupPanel(opts: {
   }
 }
 
+// ---------------------------------------------------------------------------
+// HTML status page — served at GET / (and /status, /dashboard)
+// ---------------------------------------------------------------------------
+// A proper website showing the bot's live status. This replaces the old
+// tiny JSON response at /. The JSON status is still available at /health.
+function escapeHtml(s: string): string {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
+}
+
+function generateStatusPage(): string {
+  const uptime = process.uptime();
+  const mode = DEMO_MODE ? 'demo' : 'live';
+  const statusLabel = ready ? (mode === 'live' ? 'LIVE' : 'DEMO') : 'STARTING';
+  const statusColor = ready && mode === 'live' ? '#2ecc71' : mode === 'demo' ? '#f1c40f' : '#e74c3c';
+  const statusEmoji = ready && mode === 'live' ? '🟢' : mode === 'demo' ? '🟡' : '🔴';
+
+  const totalTickets = state.tickets.length;
+  const openTickets = state.tickets.filter((t) => t.status !== 'closed').length;
+  const closedTickets = state.tickets.filter((t) => t.status === 'closed').length;
+  const nextTicketId = state.count + 1;
+
+  const configChecks: Array<[string, boolean, string]> = [
+    ['DISCORD_BOT_TOKEN', !!TOKEN, 'Bot token'],
+    ['DISCORD_GUILD_ID', !!GUILD_ID, 'Server ID'],
+    ['TICKET_PANEL_CHANNEL_ID', !!PANEL_CHANNEL_ID, 'Panel channel'],
+    ['TICKET_LOG_CHANNEL_ID', !!LOG_CHANNEL_ID, 'Log channel'],
+    ['TICKET_CATEGORY_ID', !!TICKET_CATEGORY_ID, 'Ticket category'],
+    ['TICKET_ADMIN_ROLE_ID', !!ADMIN_ROLE_ID, 'Admin role'],
+    ['TICKET_STAFF_ROLE_IDS', STAFF_ROLE_IDS.length > 0, 'Staff roles'],
+    ['ICBS_WEBHOOK_SECRET', !!WEBHOOK_SECRET, 'Webhook secret'],
+    ['ICBS_PUBLIC_URL', !!PUBLIC_URL, 'Public URL (for logo)'],
+  ];
+
+  const recentTickets = [...state.tickets]
+    .sort((a, b) => b.openedAt - a.openedAt)
+    .slice(0, 8);
+
+  const logoUrl = PUBLIC_URL ? `${PUBLIC_URL}/brand-icon.webp` : '/brand-icon.webp';
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="refresh" content="30">
+  <title>𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 𝑇𝑖𝑐𝑘𝑒𝑡 𝐵𝑜𝑡 — Status</title>
+  <link rel="icon" type="image/webp" href="${logoUrl}">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #0a0a0a;
+      color: #e8e8e8;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container { max-width: 1000px; margin: 0 auto; }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      padding: 24px 0;
+      border-bottom: 1px solid #2b2b2b;
+      margin-bottom: 32px;
+    }
+    header img {
+      width: 72px;
+      height: 72px;
+      border-radius: 12px;
+      border: 2px solid #2b2b2b;
+    }
+    header h1 {
+      font-family: 'Georgia', 'Times New Roman', serif;
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+    header .subtitle {
+      color: #888;
+      font-size: 14px;
+      margin-top: 4px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 6px 16px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      margin-left: auto;
+      background: ${statusColor};
+      color: #0a0a0a;
+    }
+    .section {
+      background: #141414;
+      border: 1px solid #2b2b2b;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+    .section h2 {
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: #888;
+      margin-bottom: 16px;
+      font-weight: 600;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 16px;
+    }
+    .stat {
+      background: #1a1a1a;
+      border: 1px solid #2b2b2b;
+      border-radius: 8px;
+      padding: 16px;
+      text-align: center;
+    }
+    .stat .value {
+      font-size: 32px;
+      font-weight: 700;
+      color: #e8e8e8;
+      font-family: 'Consolas', 'Monaco', monospace;
+    }
+    .stat .label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: #666;
+      margin-top: 6px;
+    }
+    .stat.open .value { color: #2ecc71; }
+    .stat.closed .value { color: #95a5a6; }
+    .stat.next .value { color: #f1c40f; }
+    .info-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .info-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: #1a1a1a;
+      border: 1px solid #2b2b2b;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+    .info-item .key { color: #888; }
+    .info-item .val { color: #e8e8e8; font-family: 'Consolas', monospace; }
+    .config-table { width: 100%; border-collapse: collapse; }
+    .config-table td {
+      padding: 10px 14px;
+      border-bottom: 1px solid #1f1f1f;
+      font-size: 14px;
+    }
+    .config-table td:first-child { font-family: 'Consolas', monospace; color: #bbb; }
+    .config-table td:nth-child(2) { text-align: center; width: 40px; }
+    .config-table td:last-child { color: #666; font-size: 13px; }
+    .check-yes { color: #2ecc71; font-size: 18px; }
+    .check-no { color: #e74c3c; font-size: 18px; }
+    .ticket-row {
+      display: grid;
+      grid-template-columns: 60px 1fr 120px 100px 80px;
+      gap: 12px;
+      padding: 10px 14px;
+      background: #1a1a1a;
+      border: 1px solid #2b2b2b;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      font-size: 13px;
+      align-items: center;
+    }
+    .ticket-row .id { font-family: 'Consolas', monospace; color: #f1c40f; font-weight: 700; }
+    .ticket-row .cat { color: #bbb; }
+    .ticket-row .opener { color: #888; font-size: 12px; }
+    .ticket-row .status { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; text-align: center; padding: 3px 8px; border-radius: 4px; }
+    .ticket-row .status.open { background: #1e3a1e; color: #2ecc71; }
+    .ticket-row .status.closed { background: #2b2b2b; color: #95a5a6; }
+    .ticket-row .status.reopened { background: #2e2717; color: #f1c40f; }
+    .ticket-row .time { color: #666; font-size: 11px; text-align: right; }
+    .no-tickets { text-align: center; color: #555; padding: 24px; font-style: italic; }
+    .categories {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .cat-chip {
+      background: #1a1a1a;
+      border: 1px solid #2b2b2b;
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-size: 13px;
+    }
+    .cat-chip .emoji { margin-right: 6px; }
+    footer {
+      text-align: center;
+      padding: 32px 0 16px;
+      color: #444;
+      font-size: 12px;
+      border-top: 1px solid #1a1a1a;
+      margin-top: 32px;
+    }
+    footer a { color: #666; text-decoration: none; }
+    footer a:hover { color: #aaa; }
+    .pulse {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: ${statusColor};
+      margin-right: 6px;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.2); }
+    }
+    @media (max-width: 600px) {
+      header { flex-direction: column; text-align: center; gap: 12px; }
+      .badge { margin-left: 0; }
+      .info-grid { grid-template-columns: 1fr; }
+      .ticket-row { grid-template-columns: 50px 1fr 80px; font-size: 12px; }
+      .ticket-row .opener, .ticket-row .time { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <img src="${logoUrl}" alt="ICBS Logo" onerror="this.style.display='none'">
+      <div>
+        <h1>𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 𝑇𝑖𝑐𝑘𝑒𝑡 𝐵𝑜𝑡</h1>
+        <div class="subtitle">Advanced Discord Ticket System — Status Page</div>
+      </div>
+      <span class="badge"><span class="pulse"></span>${statusEmoji} ${statusLabel}</span>
+    </header>
+
+    <div class="section">
+      <h2>📊 Ticket Statistics</h2>
+      <div class="stats-grid">
+        <div class="stat"><div class="value">${totalTickets}</div><div class="label">Total Tickets</div></div>
+        <div class="stat open"><div class="value">${openTickets}</div><div class="label">Open</div></div>
+        <div class="stat closed"><div class="value">${closedTickets}</div><div class="label">Closed</div></div>
+        <div class="stat next"><div class="value">#${nextTicketId}</div><div class="label">Next Ticket</div></div>
+        <div class="stat"><div class="value">${categories.length}</div><div class="label">Categories</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>🤖 Bot Information</h2>
+      <div class="info-grid">
+        <div class="info-item"><span class="key">Bot Tag</span><span class="val">${escapeHtml(client.user?.tag || '— not connected —')}</span></div>
+        <div class="info-item"><span class="key">Bot ID</span><span class="val">${escapeHtml(client.user?.id || '—')}</span></div>
+        <div class="info-item"><span class="key">Guild</span><span class="val">${escapeHtml(guild?.name || '— not resolved —')}</span></div>
+        <div class="info-item"><span class="key">Guild ID</span><span class="val">${escapeHtml(guild?.id || '—')}</span></div>
+        <div class="info-item"><span class="key">Mode</span><span class="val">${mode.toUpperCase()}</span></div>
+        <div class="info-item"><span class="key">Ready</span><span class="val">${ready ? '✅ Yes' : '❌ No'}</span></div>
+        <div class="info-item"><span class="key">Uptime</span><span class="val">${formatUptime(uptime)}</span></div>
+        <div class="info-item"><span class="key">Port</span><span class="val">${HTTP_PORT}</span></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>📋 Configuration Checks</h2>
+      <table class="config-table">
+        ${configChecks.map(([key, ok, hint]) => `
+        <tr>
+          <td>${key}</td>
+          <td>${ok ? '<span class="check-yes">✅</span>' : '<span class="check-no">❌</span>'}</td>
+          <td>${hint}${ok ? '' : ' — NOT SET'}</td>
+        </tr>`).join('')}
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>📂 Ticket Categories</h2>
+      <div class="categories">
+        ${categories.map((c) => `<span class="cat-chip"><span class="emoji">${c.emoji}</span>${escapeHtml(c.label)}</span>`).join('')}
+      </div>
+    </div>
+
+    ${state.panelMessageId ? `
+    <div class="section">
+      <h2>🎫 Ticket Panel</h2>
+      <div class="info-grid">
+        <div class="info-item"><span class="key">Panel Message ID</span><span class="val">${escapeHtml(state.panelMessageId)}</span></div>
+        <div class="info-item"><span class="key">Panel Channel ID</span><span class="val">${escapeHtml(state.panelChannelId || '—')}</span></div>
+      </div>
+    </div>` : ''}
+
+    <div class="section">
+      <h2>🕐 Recent Tickets</h2>
+      ${recentTickets.length === 0 ? '<div class="no-tickets">No tickets have been opened yet.</div>' : recentTickets.map((t) => `
+        <div class="ticket-row">
+          <div class="id">#${t.id}</div>
+          <div>
+            <div class="cat">${escapeHtml(t.categoryLabel)}</div>
+            <div class="opener">by ${escapeHtml(t.openerTag)}</div>
+          </div>
+          <div class="opener">${escapeHtml(t.claimedByTag ? '📋 ' + t.claimedByTag : '— unclaimed —')}</div>
+          <div class="status ${t.status}">${t.status}</div>
+          <div class="time">${new Date(t.openedAt).toLocaleString()}</div>
+        </div>`).join('')}
+    </div>
+
+    <footer>
+      <p>𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 — Support Delivered</p>
+      <p style="margin-top:8px;">
+        Auto-refreshes every 30 seconds ·
+        <a href="/health">JSON API</a> ·
+        <a href="/ping">Ping</a> ·
+        <a href="/uptime">Uptime</a> ·
+        <a href="/brand-icon.webp">Logo</a>
+      </p>
+      <p style="margin-top:8px;">Last updated: ${new Date().toISOString()}</p>
+    </footer>
+  </div>
+</body>
+</html>`;
+}
+
 
 // ---------------------------------------------------------------------------
 // HTTP server
@@ -1521,21 +1857,25 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // --- GET /  (root — Render's default health check pings this) ---
-  // Returns a tiny 200 OK so Render marks the service as "live" without
-  // needing to configure a custom Health Check Path. Use /health for the
-  // full status payload.
-  if (req.method === 'GET' && (pathname === '/' || pathname === '')) {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        ok: true,
-        service: 'icbs-ticket-bot',
-        mode: DEMO_MODE ? 'demo' : 'live',
-        ready,
-        uptime: process.uptime(),
-      }),
-    );
+  // --- GET /  (the HTML status website — Render's default health check too) ---
+  // Returns a full HTML page showing the bot's live status. This is what
+  // appears when you visit the bot's URL in a browser. Also works as
+  // Render's health check (returns 200 OK).
+  if (req.method === 'GET' && (pathname === '/' || pathname === '/status' || pathname === '/dashboard')) {
+    const html = generateStatusPage();
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+    return;
+  }
+
+  // --- GET /uptime  (plain text — simplest possible for UptimeRobot) ---
+  // Returns "OK" as plain text. Some uptime monitors struggle with JSON or
+  // HTML; this endpoint returns the simplest possible 200 response so any
+  // monitor can detect the service is alive.
+  // Point UptimeRobot at: https://icbs-ticket-bot.onrender.com/uptime
+  if (req.method === 'GET' && pathname === '/uptime') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('OK');
     return;
   }
 
@@ -1647,13 +1987,17 @@ const server = http.createServer(async (req, res) => {
 // (Render requires this — listening on localhost only won't pass health checks).
 server.listen(HTTP_PORT, '0.0.0.0', () => {
   console.log(`[ticket-bot] 🌐 HTTP server listening on http://0.0.0.0:${HTTP_PORT}`);
-  console.log(`[ticket-bot]    GET  /                (root health check — Render default)`);
-  console.log(`[ticket-bot]    GET  /ping            (lightweight, no auth)`);
-  console.log(`[ticket-bot]    GET  /health          (full status payload)`);
+  console.log(`[ticket-bot]    GET  /                (HTML status website — visit in browser)`);
+  console.log(`[ticket-bot]    GET  /uptime          (plain text "OK" — for UptimeRobot)`);
+  console.log(`[ticket-bot]    GET  /ping            (lightweight JSON, no auth)`);
+  console.log(`[ticket-bot]    GET  /health          (full JSON status payload)`);
   console.log(`[ticket-bot]    GET  /brand-icon.webp (the ICBS logo — used as embed thumbnail)`);
   console.log(`[ticket-bot]    POST /setup-panel    (auth: x-icbs-secret — post the ticket panel)`);
   if (PUBLIC_URL) {
-    console.log(`[ticket-bot] 🎨 Brand icon URL: ${PUBLIC_URL}/brand-icon.webp`);
+    console.log(`[ticket-bot] 🌍 Public URL: ${PUBLIC_URL}`);
+    console.log(`[ticket-bot] 🎨 Brand icon:  ${PUBLIC_URL}/brand-icon.webp`);
+    console.log(`[ticket-bot] 📊 Status page: ${PUBLIC_URL}/`);
+    console.log(`[ticket-bot] ⏱️  Uptime monitor: ${PUBLIC_URL}/uptime`);
   } else {
     console.log(`[ticket-bot] ⚠️  ICBS_PUBLIC_URL not set — embeds will fall back to Discord default avatar.`);
     console.log(`[ticket-bot]    Set ICBS_PUBLIC_URL to your Render URL (e.g. https://icbs-ticket-bot.onrender.com) to use the ICBS logo.`);
