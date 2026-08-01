@@ -10,10 +10,15 @@ Users pick a category from a panel → a private channel is created → staff cl
 
 ```
 .
+├── package.json                 # ROOT — deps + start script (Render deploys from here)
+├── render.yaml                  # Render Blueprint — one-click deploy
+├── Dockerfile                   # Backup deploy method (Docker runtime)
+├── .dockerignore
+├── bun.lock                     # lockfile for reproducible installs
 ├── mini-services/
 │   └── icbs-ticket-bot/         # the standalone bot service
 │       ├── index.ts             # discord.js client + HTTP server + all ticket logic
-│       ├── package.json         # discord.js v14, dotenv; scripts: dev (bun --hot), start
+│       ├── package.json         # for local dev inside the folder
 │       ├── .env.example         # template — copy to .env and fill in
 │       └── README.md            # full bot setup + deployment docs
 ├── src/                         # Next.js web-app integration (drop into your existing app)
@@ -26,7 +31,10 @@ Users pick a category from a panel → a private channel is created → staff cl
 │       │   └── ticket-setup/    # authed POST → bot's /setup-panel
 │       └── page.tsx             # dashboard with Ticket Bot Status + Panel Setup form
 ├── scripts/
-│   └── smoke-test-ticket-bot.sh # demo-mode smoke test
+│   ├── smoke-test-ticket-bot.sh # demo-mode smoke test
+│   ├── discover-guild.ts        # list guild channels + roles, auto-detect IDs
+│   ├── setup-guild.ts           # create Discord resources + write IDs to .env
+│   └── test-render-mode.sh      # verify the bot works with PORT env (Render mode)
 ├── worklog.md                   # build/deploy log
 └── .gitignore
 ```
@@ -74,16 +82,72 @@ curl -X POST http://localhost:3040/setup-panel \
 
 | Method | Path           | Auth                | Purpose                                  |
 |--------|----------------|---------------------|------------------------------------------|
-| GET    | `/health`      | none                | Status JSON — used by dashboard + ping.  |
+| GET    | `/`            | none                | Tiny 200 — Render's default health check.|
+| GET    | `/ping`        | none                | Lightweight status — for UptimeRobot.    |
+| GET    | `/health`      | none                | Full status JSON — used by dashboard.    |
 | POST   | `/setup-panel` | `x-icbs-secret` hdr | Create / post the ticket panel message.  |
 
-## Deployment (Render)
+## Deployment on Render (as a Web Service)
 
-See [`mini-services/icbs-ticket-bot/README.md`](mini-services/icbs-ticket-bot/README.md) for the full Render deployment guide. TL;DR:
+The bot runs as a **standalone Render Web Service**. It binds to `0.0.0.0:$PORT` (Render sets `PORT` automatically) and exposes `/` for Render's default health check.
 
-- **Option A (recommended)** — spawn the bot as a detached child of the Next.js web service. No separate Render service needed. The first `/api/ticket-health` call spawns it.
-- **Option B** — run the bot as its own Render Background Worker. Set `ICBS_TICKET_BOT_URL` on the web service to point at it.
-- Keep-alive: UptimeRobot → `https://your-web-app.onrender.com/api/ticket-ping`.
+### Option A — One-click Blueprint (recommended)
+
+1. Push this repo to GitHub (already done: <https://github.com/worldguy36/ICBS-Ticket-Bot>).
+2. Go to <https://dashboard.render.com/blueprints> and click **New Blueprint Instance**.
+3. Select the `worldguy36/ICBS-Ticket-Bot` repo. Render reads `render.yaml` and creates the service automatically.
+4. You'll be prompted for two secrets:
+   - `DISCORD_BOT_TOKEN` — your bot token
+   - `ICBS_WEBHOOK_SECRET` — any random string (used to auth `/setup-panel` calls)
+5. The other env vars (guild ID, channel IDs, role IDs) are pre-filled in `render.yaml` from your Discord server.
+6. Click **Apply**. Render builds + deploys. First deploy takes ~1 min.
+7. Once live, your bot is at `https://icbs-ticket-bot.onrender.com` (or your chosen subdomain).
+
+### Option B — Manual setup via Render dashboard
+
+1. Go to <https://dashboard.render.com> → **New +** → **Web Service**.
+2. Connect your GitHub repo `worldguy36/ICBS-Ticket-Bot`.
+3. Configure:
+   - **Runtime:** Bun
+   - **Build Command:** `bun install`
+   - **Start Command:** `bun mini-services/icbs-ticket-bot/index.ts`
+   - **Health Check Path:** `/` (the root endpoint returns 200)
+   - **Plan:** Free (or paid for always-on)
+4. Add environment variables (see `render.yaml` for the full list — copy all of them into the Render dashboard).
+5. Click **Create Web Service**.
+
+### Option C — Docker runtime (fallback)
+
+If Render's native Bun runtime has issues, switch the service runtime to **Docker** and leave the `Dockerfile` at the repo root. Render will build + run it.
+
+### Keeping it awake (Free plan)
+
+Render's Free plan spins down after 15 min of inactivity. To keep the bot awake:
+
+1. Sign up at <https://uptimerobot.com> (free).
+2. Add an HTTP monitor:
+   - URL: `https://icbs-ticket-bot.onrender.com/ping`
+   - Interval: 5 minutes
+3. UptimeRobot will ping every 5 min, keeping the service warm.
+
+### Posting the ticket panel
+
+Once the service is live, post the ticket panel to your `#ticket-panel` Discord channel:
+
+```bash
+curl -X POST https://icbs-ticket-bot.onrender.com/setup-panel \
+  -H "x-icbs-secret: YOUR_ICBS_WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+(Use `{}` for the default 6-category panel, or pass a custom body — see `mini-services/icbs-ticket-bot/README.md`.)
+
+### Checking status
+
+- `GET https://icbs-ticket-bot.onrender.com/` — tiny status (Render health check).
+- `GET https://icbs-ticket-bot.onrender.com/health` — full status JSON with config checks + ticket stats.
+- `GET https://icbs-ticket-bot.onrender.com/ping` — lightweight, for UptimeRobot.
 
 ## Discord setup
 

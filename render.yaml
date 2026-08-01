@@ -1,0 +1,58 @@
+# =============================================================================
+# Render Blueprint — 𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 𝑇𝑖𝑐𝑘𝑒𝑡 𝐵𝑜𝑭
+# ----------------------------------------------------------------------------
+# To deploy: push this file to your repo, then go to:
+#   https://dashboard.render.com/blueprints
+# and select this repo. Render will read this file and create the service
+# automatically. You'll be prompted for the two `sync: false` secrets.
+#
+# After deploy, the service will be reachable at:
+#   https://icbs-ticket-bot.onrender.com  (or your chosen subdomain)
+# =============================================================================
+
+services:
+  - type: web
+    name: icbs-ticket-bot
+    runtime: bun
+    plan: free
+    region: oregon
+
+    # Build: install deps at repo root (where this package.json lives).
+    buildCommand: bun install
+    # Start: run the bot. It binds to 0.0.0.0:$PORT automatically.
+    startCommand: bun mini-services/icbs-ticket-bot/index.ts
+
+    # Render will ping this path to check if the service is live.
+    # / returns a tiny 200 JSON payload — perfect for the health check.
+    healthCheckPath: /
+
+    # Auto-deploy when you push to main.
+    autoDeploy: true
+    branch: main
+
+    envVars:
+      # --- Secrets (you'll be prompted for these in the dashboard) ---
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: ICBS_WEBHOOK_SECRET
+        sync: false
+
+      # --- Pre-filled with the discovered values from your Discord server ---
+      # Server: 𝐌𝐢𝐥𝐢𝐭𝐚𝐫𝐲 𝐂𝐡𝐞𝐜𝐤𝐩𝐨𝐢𝐧𝐭 𝐑𝐨𝐥𝐞𝐩𝐥𝐚𝐲
+      - key: DISCORD_GUILD_ID
+        value: "1509170609760763964"
+      - key: TICKET_PANEL_CHANNEL_ID
+        value: "1533131440496316587"
+      - key: TICKET_LOG_CHANNEL_ID
+        value: "1533131442077302907"
+      - key: TICKET_CATEGORY_ID
+        value: "1533131438587773021"
+      - key: TICKET_ADMIN_ROLE_ID
+        value: "1533130635131092995"
+      - key: TICKET_STAFF_ROLE_IDS
+        value: "1510013691515502843"
+
+      # Render sets PORT automatically — the bot reads it.
+      # ICBS_BOT_PORT is only used in local dev / detached-child mode.
+      - key: ICBS_BOT_PORT
+        value: "3040"

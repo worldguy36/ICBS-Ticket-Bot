@@ -1,0 +1,28 @@
+{
+  "name": "icbs-ticket-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 𝑇𝑖𝑐𝑘𝑒𝑡 𝐵𝑜𝑡 — advanced Discord ticket system. Deploy as a Render web service.",
+  "type": "module",
+  "scripts": {
+    "start": "bun mini-services/icbs-ticket-bot/index.ts",
+    "dev": "bun --hot mini-services/icbs-ticket-bot/index.ts",
+    "start:bot": "cd mini-services/icbs-ticket-bot && bun index.ts",
+    "dev:bot": "cd mini-services/icbs-ticket-bot && bun --hot index.ts"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "keywords": [
+    "discord",
+    "ticket-bot",
+    "icbs",
+    "support",
+    "render"
+  ],
+  "license": "UNLICENSED"
+}

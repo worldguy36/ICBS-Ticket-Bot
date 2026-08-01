@@ -81,7 +81,12 @@ const STAFF_ROLE_IDS = (process.env.TICKET_STAFF_ROLE_IDS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
-const HTTP_PORT = Number(process.env.ICBS_BOT_PORT || 3040);
+// Render web services set PORT automatically. Use it when present so the
+// service binds to the port Render expects. Otherwise fall back to
+// ICBS_BOT_PORT (default 3040) for local dev / detached-child mode.
+// Note: in detached-child mode, ticket-client.ts sets PORT=undefined in the
+// child env, so this still respects ICBS_BOT_PORT there.
+const HTTP_PORT = Number(process.env.PORT || process.env.ICBS_BOT_PORT || 3040);
 const WEBHOOK_SECRET = process.env.ICBS_WEBHOOK_SECRET || '';
 
 const DEMO_MODE = !TOKEN;
@@ -1096,6 +1101,38 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // --- GET /  (root — Render's default health check pings this) ---
+  // Returns a tiny 200 OK so Render marks the service as "live" without
+  // needing to configure a custom Health Check Path. Use /health for the
+  // full status payload.
+  if (req.method === 'GET' && (pathname === '/' || pathname === '')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        ok: true,
+        service: 'icbs-ticket-bot',
+        mode: DEMO_MODE ? 'demo' : 'live',
+        ready,
+        uptime: process.uptime(),
+      }),
+    );
+    return;
+  }
+
+  // --- GET /ping  (alias — lightweight, no auth) ---
+  if (req.method === 'GET' && pathname === '/ping') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        ok: true,
+        service: 'icbs-ticket-bot',
+        mode: DEMO_MODE ? 'demo' : 'live',
+        ready,
+      }),
+    );
+    return;
+  }
+
   // --- GET /health ---
   if (req.method === 'GET' && pathname === '/health') {
     const payload = {
@@ -1168,10 +1205,14 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ ok: false, error: `Not found: ${req.method} ${pathname}` }));
 });
 
-server.listen(HTTP_PORT, () => {
-  console.log(`[ticket-bot] 🌐 HTTP server listening on http://localhost:${HTTP_PORT}`);
-  console.log(`[ticket-bot]    GET  /health`);
-  console.log(`[ticket-bot]    POST /setup-panel   (auth: x-icbs-secret)`);
+// Bind to 0.0.0.0 so the service is reachable from outside the container
+// (Render requires this — listening on localhost only won't pass health checks).
+server.listen(HTTP_PORT, '0.0.0.0', () => {
+  console.log(`[ticket-bot] 🌐 HTTP server listening on http://0.0.0.0:${HTTP_PORT}`);
+  console.log(`[ticket-bot]    GET  /            (root health check — Render default)`);
+  console.log(`[ticket-bot]    GET  /ping        (lightweight, no auth)`);
+  console.log(`[ticket-bot]    GET  /health      (full status payload)`);
+  console.log(`[ticket-bot]    POST /setup-panel (auth: x-icbs-secret)`);
 });
 
 // ---------------------------------------------------------------------------
