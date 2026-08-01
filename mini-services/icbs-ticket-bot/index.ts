@@ -133,13 +133,6 @@ const DEFAULT_CATEGORIES: Category[] = [
     color: 0x2ecc71,
   },
   {
-    id: 'staff',
-    emoji: '🟦',
-    label: 'Staff Application',
-    description: 'Apply to join the 𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 staff team.',
-    color: 0x4b4b4b,
-  },
-  {
     id: 'appeal',
     emoji: '🟪',
     label: 'Appeal a Ban',
@@ -321,20 +314,21 @@ client.once(Events.ClientReady, async (c) => {
   const configChecks: Array<[string, boolean, string]> = [
     ['DISCORD_BOT_TOKEN', !!TOKEN, 'Bot token (REQUIRED)'],
     ['DISCORD_GUILD_ID', !!GUILD_ID, 'Server ID (REQUIRED)'],
-    ['TICKET_PANEL_CHANNEL_ID', !!PANEL_CHANNEL_ID, 'Channel for the ticket panel — leave empty to auto-create via POST /setup-guild'],
-    ['TICKET_LOG_CHANNEL_ID', !!LOG_CHANNEL_ID, 'Channel for ticket logs — leave empty to auto-create via POST /setup-guild'],
-    ['TICKET_CATEGORY_ID', !!TICKET_CATEGORY_ID, 'Discord category for ticket channels — leave empty to auto-create via POST /setup-guild'],
-    ['TICKET_ADMIN_ROLE_ID', !!ADMIN_ROLE_ID, 'Role with full ticket access — leave empty to auto-create via POST /setup-guild'],
-    ['TICKET_STAFF_ROLE_IDS', STAFF_ROLE_IDS.length > 0, 'Comma-separated staff role IDs — leave empty to auto-create via POST /setup-guild'],
-    ['ICBS_WEBHOOK_SECRET', !!WEBHOOK_SECRET, 'Secret for /setup-panel and /setup-guild auth (REQUIRED)'],
+    ['TICKET_PANEL_CHANNEL_ID', !!PANEL_CHANNEL_ID, 'Channel where the ticket panel is posted'],
+    ['TICKET_LOG_CHANNEL_ID', !!LOG_CHANNEL_ID, 'Channel for ticket open/close logs + transcripts'],
+    ['TICKET_CATEGORY_ID', !!TICKET_CATEGORY_ID, 'Discord category ticket channels are created under'],
+    ['TICKET_ADMIN_ROLE_ID', !!ADMIN_ROLE_ID, 'Role with full access to ALL tickets'],
+    ['TICKET_STAFF_ROLE_IDS', STAFF_ROLE_IDS.length > 0, 'Comma-separated staff role IDs added to tickets'],
+    ['ICBS_WEBHOOK_SECRET', !!WEBHOOK_SECRET, 'Secret for /setup-panel auth (REQUIRED)'],
   ];
   for (const [key, ok, hint] of configChecks) {
     console.log(`  ${ok ? '✅' : '⚠️ '} ${key.padEnd(28)} ${ok ? 'set' : 'NOT SET'}  — ${hint}`);
   }
   console.log('─'.repeat(60));
   if (!PANEL_CHANNEL_ID || !LOG_CHANNEL_ID || !TICKET_CATEGORY_ID || !ADMIN_ROLE_ID || !STAFF_ROLE_IDS.length) {
-    console.log('💡 Tip: Call POST /setup-guild to auto-create missing channels + roles.');
-    console.log('   curl -X POST <BOT_URL>/setup-guild -H "x-icbs-secret: $ICBS_WEBHOOK_SECRET" -d \'{"postPanel":true}\'');
+    console.log('💡 Configure the missing IDs in your Render web service → Environment tab.');
+    console.log('   To find a Discord ID: enable Developer Mode (Discord settings → Advanced),');
+    console.log('   then right-click the channel/category/role → Copy ID.');
     console.log('─'.repeat(60));
   }
   console.log('');
@@ -510,62 +504,114 @@ async function handlePanelSelect(interaction: StringSelectMenuInteraction) {
   openCooldowns.set(userId, now);
   saveState();
 
-  // Build the opening embed + buttons
+  // Build the opening embed + buttons (enhanced UI)
   const embed = brandEmbed()
     .setTitle(`🎫 Ticket #${ticket.id} — ${cat.emoji} ${cat.label}`)
     .setDescription(
       [
-        `Thank you for contacting ${BRAND} support team. A staff member will be with you shortly.`,
+        `👋 **Welcome to your support ticket, <@${userId}>!**`,
         '',
-        `**Opened by:** <@${userId}> (\`${openerTag}\`)`,
-        `**Category:** ${cat.emoji} ${cat.label}`,
-        `**Opened at:** <t:${Math.floor(now / 1000)}:F>`,
+        `A member of the ${BRAND} staff team will be with you shortly. Please describe your issue in **as much detail as possible** — include screenshots, error messages, and steps to reproduce if applicable.`,
         '',
-        'Describe your issue in as much detail as possible. Spamming, abuse, or off-topic chatter may result in a warning.',
+        `┌──────────────────────────────────────┐`,
+        `│  🎫 **Ticket ID:** #${ticket.id}`,
+        `│  📂 **Category:** ${cat.emoji} ${cat.label}`,
+        `│  👤 **Opened by:** <@${userId}>`,
+        `│  ⏰ **Opened at:** <t:${Math.floor(now / 1000)}:F>`,
+        `└──────────────────────────────────────┘`,
       ].join('\n'),
     )
     .setColor(cat.color)
-    .addFields({
-      name: 'Status',
-      value: '🟢 **Unclaimed** — waiting for a staff member to claim.',
-      inline: false,
-    });
+    .setThumbnail(BRAND_ICON)
+    .addFields(
+      {
+        name: '📋 Current Status',
+        value: '🟢 **Unclaimed** — waiting for a staff member to claim this ticket.',
+        inline: false,
+      },
+      {
+        name: '💡 What to Do Next',
+        value: [
+          '1️⃣  Describe your issue in detail below.',
+          '2️⃣  Attach screenshots or files if helpful.',
+          '3️⃣  Wait for a staff member to claim the ticket.',
+          '4️⃣  Use the **🔒 Close** button when your issue is resolved.',
+        ].join('\n'),
+        inline: false,
+      },
+      {
+        name: '⚠️ Ticket Rules',
+        value: [
+          '• Be respectful to staff and other members.',
+          '• Don\'t ping staff — they are notified automatically.',
+          '• Stay on topic — keep the discussion relevant.',
+          '• One issue per ticket — open a new one for unrelated problems.',
+        ].join('\n'),
+        inline: false,
+      },
+    );
 
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`ticket_claim_${ticket.id}`).setLabel('Claim').setEmoji('📋').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`ticket_close_${ticket.id}`).setLabel('Close').setEmoji('🔒').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`ticket_close_reason_${ticket.id}`).setLabel('Close with Reason').setEmoji('🔴').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(`ticket_reopen_${ticket.id}`).setLabel('Reopen').setEmoji('↩️').setStyle(ButtonStyle.Success).setDisabled(true),
+    new ButtonBuilder()
+      .setCustomId(`ticket_claim_${ticket.id}`)
+      .setLabel('Claim Ticket')
+      .setEmoji('📋')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`ticket_close_${ticket.id}`)
+      .setLabel('Close Ticket')
+      .setEmoji('🔒')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`ticket_close_reason_${ticket.id}`)
+      .setLabel('Close + Reason')
+      .setEmoji('🔴')
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId(`ticket_reopen_${ticket.id}`)
+      .setLabel('Reopen')
+      .setEmoji('↩️')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(true),
   );
 
   const staffRole = categoryStaffRoleId(cat);
   const mentions = [staffRole ? `<@&${staffRole}>` : '', ADMIN_ROLE_ID ? `<@&${ADMIN_ROLE_ID}>` : ''].filter(Boolean).join(' ');
-  await channel.send({ content: `<@${userId}> ${mentions}`, embeds: [embed], components: [row] });
+  await channel.send({ content: `👋 <@${userId}> ${mentions}`, embeds: [embed], components: [row] });
 
-  // DM the opener
+  // DM the opener — enhanced confirmation
   const dmEmbed = brandEmbed()
-    .setTitle(`🎫 Ticket #${ticket.id} opened`)
-    .setDescription(`Your ticket has been opened in **${interaction.guild.name}**.`)
-    .addFields(
-      { name: 'Category', value: `${cat.emoji} ${cat.label}`, inline: true },
-      { name: 'Channel', value: `[Jump to ticket](${channel.url})`, inline: true },
+    .setTitle(`🎫 Ticket #${ticket.id} Opened`)
+    .setDescription(
+      [
+        `Your support ticket has been opened in **${interaction.guild.name}**.`,
+        '',
+        `📂 **Category:** ${cat.emoji} ${cat.label}`,
+        `🔗 **Channel:** [Jump to ticket](${channel.url})`,
+        `⏰ **Opened at:** <t:${Math.floor(now / 1000)}:F>`,
+        '',
+        'A staff member will respond shortly. You can continue the conversation in the ticket channel.',
+      ].join('\n'),
     )
-    .setColor(cat.color);
+    .setColor(cat.color)
+    .setThumbnail(BRAND_ICON);
   await safeDm(interaction.user, dmEmbed);
 
-  // Log channel
+  // Log channel — enhanced open log
   const logEmbed = brandEmbed()
-    .setTitle(`🎫 Ticket #${ticket.id} opened`)
+    .setTitle(`🟢 Ticket #${ticket.id} Opened`)
     .setColor(cat.color)
+    .setThumbnail(BRAND_ICON)
+    .setDescription(`A new ticket has been opened in the **${cat.label}** category.`)
     .addFields(
-      { name: 'Opener', value: `<@${userId}> (\`${openerTag}\`)`, inline: true },
-      { name: 'Category', value: `${cat.emoji} ${cat.label}`, inline: true },
-      { name: 'Channel', value: `${channel.name} — [jump](${channel.url})`, inline: false },
-      { name: 'Opened at', value: `<t:${Math.floor(now / 1000)}:F>`, inline: false },
+      { name: '👤 Opener', value: `<@${userId}>\n\`${openerTag}\``, inline: true },
+      { name: '📂 Category', value: `${cat.emoji} ${cat.label}`, inline: true },
+      { name: '⏰ Opened at', value: `<t:${Math.floor(now / 1000)}:F>\n(<t:${Math.floor(now / 1000)}:R>)`, inline: true },
+      { name: '🎫 Ticket Channel', value: `**#${channel.name}**\n[🔗 Jump to ticket](${channel.url})`, inline: false },
     );
   await sendToLogChannel(interaction.guild, { embeds: [logEmbed] });
 
-  await interaction.editReply({ content: `✅ Ticket opened: ${channel}` });
+  await interaction.editReply({ content: `✅ **Ticket opened:** ${channel}\n\n🎫 A private channel has been created for you. Check it out — our staff team has been notified.` });
 }
 
 function buildTicketPermissions(
@@ -778,46 +824,65 @@ async function closeTicket(
   await interaction.editReply({ content: '🔒 Generating transcript and notifying opener…' });
   await sleep(800);
 
-  // DM the opener
+  // DM the opener — enhanced close notification
   const opener = await client.users.fetch(ticket.openerId).catch(() => null);
+  const cat = categoryById(ticket.categoryId);
   const dmEmbed = brandEmbed()
-    .setTitle(`🎫 Ticket #${ticket.id} closed`)
-    .setDescription(`Your ticket in **${interaction.guild.name}** has been closed.`)
-    .setColor(ticket.categoryId ? categoryById(ticket.categoryId)?.color || 0x4b4b4b : 0x4b4b4b)
+    .setTitle(`🔒 Ticket #${ticket.id} Closed`)
+    .setDescription(
+      [
+        `Your support ticket in **${interaction.guild.name}** has been closed.`,
+        '',
+        '📄 **A transcript of your ticket is attached to this message** — keep it for your records.',
+        '',
+        'If you need further help, feel free to open a new ticket from the support panel.',
+      ].join('\n'),
+    )
+    .setColor(cat?.color || 0x4b4b4b)
+    .setThumbnail(BRAND_ICON)
     .addFields(
-      { name: 'Category', value: categoryById(ticket.categoryId)?.label || ticket.categoryLabel, inline: true },
-      { name: 'Closed by', value: `<@${interaction.user.id}> (\`${interaction.user.tag}\`)`, inline: true },
-      { name: 'Duration', value: formatDuration(now - ticket.openedAt), inline: true },
-      { name: 'Messages', value: String(ticket.messageCount), inline: true },
-      ...(reason ? [{ name: 'Reason', value: reason as string, inline: false }] : []),
+      { name: '📂 Category', value: `${cat?.emoji || '🎫'} ${cat?.label || ticket.categoryLabel}`, inline: true },
+      { name: '👤 Closed by', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+      { name: '⏱️ Duration', value: formatDuration(now - ticket.openedAt), inline: true },
+      { name: '💬 Messages', value: String(ticket.messageCount), inline: true },
+      ...(reason ? [{ name: '📝 Close Reason', value: reason as string, inline: false }] : []),
     );
   await safeDm(opener, dmEmbed, [attachment]);
 
-  // Post to log channel
+  // Post to log channel — enhanced close log
   const logEmbed = brandEmbed()
-    .setTitle(`🔒 Ticket #${ticket.id} closed`)
+    .setTitle(`🔒 Ticket #${ticket.id} Closed`)
     .setColor(0x2b2b2b)
+    .setThumbnail(BRAND_ICON)
+    .setDescription(`A ticket has been closed. Transcript is attached.`)
     .addFields(
-      { name: 'Opener', value: `<@${ticket.openerId}> (\`${ticket.openerTag}\`)`, inline: true },
-      { name: 'Closed by', value: `<@${interaction.user.id}> (\`${interaction.user.tag}\`)`, inline: true },
-      { name: 'Claimed by', value: ticket.claimedByTag ? `<@${ticket.claimedById}> (\`${ticket.claimedByTag}\`)` : '— unclaimed —', inline: true },
-      { name: 'Category', value: categoryById(ticket.categoryId)?.label || ticket.categoryLabel, inline: true },
-      { name: 'Duration', value: formatDuration(now - ticket.openedAt), inline: true },
-      { name: 'Messages', value: String(ticket.messageCount), inline: true },
-      ...(reason ? [{ name: 'Reason', value: reason as string, inline: false }] : []),
+      { name: '👤 Opener', value: `<@${ticket.openerId}>\n\`${ticket.openerTag}\``, inline: true },
+      { name: '🔨 Closed by', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+      { name: '📋 Claimed by', value: ticket.claimedByTag ? `<@${ticket.claimedById}>\n\`${ticket.claimedByTag}\`` : '— *unclaimed* —', inline: true },
+      { name: '📂 Category', value: `${cat?.emoji || '🎫'} ${cat?.label || ticket.categoryLabel}`, inline: true },
+      { name: '⏱️ Duration', value: formatDuration(now - ticket.openedAt), inline: true },
+      { name: '💬 Messages', value: String(ticket.messageCount), inline: true },
+      ...(reason ? [{ name: '📝 Close Reason', value: reason as string, inline: false }] : []),
     );
   await sendToLogChannel(interaction.guild, { embeds: [logEmbed], files: [attachment] });
 
   // Countdown message + delete
-  await channel.send('⚠️ This channel will be deleted in **5 seconds**…');
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0xe74c3c)
+        .setDescription('⚠️ **This channel will be deleted in 5 seconds…**')
+        .setFooter({ text: 'Transcript has been saved and sent to the opener.' }),
+    ],
+  });
   await sleep(1000);
-  await channel.send('4…');
+  await channel.send('⏳ **4…**');
   await sleep(1000);
-  await channel.send('3…');
+  await channel.send('⏳ **3…**');
   await sleep(1000);
-  await channel.send('2…');
+  await channel.send('⏳ **2…**');
   await sleep(1000);
-  await channel.send('1…');
+  await channel.send('⏳ **1…**');
   await sleep(1000);
 
   // Keep the channel ID null after deletion so reopen won't find it
@@ -867,41 +932,51 @@ async function updateTicketMessage(channel: TextChannel, ticket: TicketRecord) {
 
     const cat = categoryById(ticket.categoryId);
     const embed = EmbedBuilder.from(ticketMsg.embeds[0]);
-    const statusField = ticket.claimedById
-      ? `✅ **Claimed** by <@${ticket.claimedById}> (\`${ticket.claimedByTag}\`)`
-      : '🟢 **Unclaimed** — waiting for a staff member to claim.';
-    embed.spliceFields(0, embed.data.fields?.length || 0, { name: 'Status', value: statusField, inline: false });
 
+    // Determine status display
+    let statusField: string;
     if (ticket.status === 'closed') {
-      embed.addFields({
-        name: 'Closed',
-        value: `🔒 Closed by <@${ticket.closerId}> at <t:${Math.floor((ticket.closedAt || Date.now()) / 1000)}:F>`,
-        inline: false,
-      });
+      statusField = `🔴 **Closed** by <@${ticket.closerId}>\n\`${ticket.closerTag}\`\n⏰ Closed at <t:${Math.floor((ticket.closedAt || Date.now()) / 1000)}:F>`;
+    } else if (ticket.claimedById) {
+      statusField = `✅ **Claimed** by <@${ticket.claimedById}>\n\`${ticket.claimedByTag}\``;
+    } else {
+      statusField = '🟢 **Unclaimed** — waiting for a staff member to claim.';
+    }
+
+    // Replace the first field (status) and keep the rest
+    embed.spliceFields(0, 1, { name: '📋 Current Status', value: statusField, inline: false });
+
+    // Color shift based on status
+    if (ticket.status === 'closed') {
+      embed.setColor(0x2b2b2b);
+    } else if (ticket.claimedById) {
+      embed.setColor(0x2ecc71); // green when claimed
+    } else {
+      embed.setColor(cat?.color || 0x4b4b4b);
     }
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(`ticket_claim_${ticket.id}`)
-        .setLabel(ticket.claimedById ? `Claimed by ${ticket.claimedByTag?.split('#')[0] || 'staff'}` : 'Claim')
+        .setLabel(ticket.claimedById ? `✅ Claimed by ${ticket.claimedByTag?.split('#')[0] || 'staff'}` : 'Claim Ticket')
         .setEmoji('📋')
-        .setStyle(ButtonStyle.Primary)
+        .setStyle(ticket.claimedById ? ButtonStyle.Success : ButtonStyle.Primary)
         .setDisabled(!!ticket.claimedById || ticket.status === 'closed'),
       new ButtonBuilder()
         .setCustomId(`ticket_close_${ticket.id}`)
-        .setLabel('Close')
+        .setLabel('Close Ticket')
         .setEmoji('🔒')
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(ticket.status === 'closed'),
       new ButtonBuilder()
         .setCustomId(`ticket_close_reason_${ticket.id}`)
-        .setLabel('Close with Reason')
+        .setLabel('Close + Reason')
         .setEmoji('🔴')
         .setStyle(ButtonStyle.Danger)
         .setDisabled(ticket.status === 'closed'),
       new ButtonBuilder()
         .setCustomId(`ticket_reopen_${ticket.id}`)
-        .setLabel('Reopen')
+        .setLabel('Reopen Ticket')
         .setEmoji('↩️')
         .setStyle(ButtonStyle.Success)
         .setDisabled(ticket.status !== 'closed'),
@@ -924,16 +999,31 @@ async function buildTranscript(
 ): Promise<{ content: string }> {
   const cat = categoryById(ticket.categoryId);
   const lines: string[] = [];
-  lines.push('========================================');
-  lines.push(`${BRAND_TICKET} — Transcript`);
-  lines.push(`Ticket: #${ticket.id} | Category: ${cat?.label || ticket.categoryLabel}`);
-  lines.push(`Opened by: ${ticket.openerTag} | Closed by: ${closer.tag}`);
-  if (ticket.claimedByTag) lines.push(`Claimed by: ${ticket.claimedByTag}`);
-  if (reason) lines.push(`Close reason: ${reason}`);
-  lines.push(`Opened: ${new Date(ticket.openedAt).toISOString()}`);
-  lines.push(`Closed:  ${new Date().toISOString()}`);
-  lines.push(`Duration: ${formatDuration(Date.now() - ticket.openedAt)}`);
-  lines.push('========================================');
+  lines.push('╔══════════════════════════════════════════════════════════════════════╗');
+  lines.push('║                                                                      ║');
+  lines.push(`║   ${BRAND_TICKET} — Transcript`);
+  lines.push('║                                                                      ║');
+  lines.push('╚══════════════════════════════════════════════════════════════════════╝');
+  lines.push('');
+  lines.push('┌──────────────────────────────────────────────────────────────────────┐');
+  lines.push(`│  🎫 Ticket ID:    #${ticket.id}`);
+  lines.push(`│  📂 Category:     ${cat?.emoji || '🎫'} ${cat?.label || ticket.categoryLabel}`);
+  lines.push(`│  👤 Opened by:    ${ticket.openerTag}`);
+  lines.push(`│  🔨 Closed by:    ${closer.tag}`);
+  if (ticket.claimedByTag) lines.push(`│  📋 Claimed by:   ${ticket.claimedByTag}`);
+  lines.push(`│  ⏰ Opened at:    ${new Date(ticket.openedAt).toISOString()}`);
+  lines.push(`│  ⏰ Closed at:    ${new Date().toISOString()}`);
+  lines.push(`│  ⏱️  Duration:     ${formatDuration(Date.now() - ticket.openedAt)}`);
+  lines.push(`│  💬 Messages:     ${ticket.messageCount}`);
+  if (reason) {
+    lines.push('├──────────────────────────────────────────────────────────────────────┤');
+    lines.push(`│  📝 Close Reason: ${reason}`);
+  }
+  lines.push('└──────────────────────────────────────────────────────────────────────┘');
+  lines.push('');
+  lines.push('═════════════════════════════════════════════════════════════════════════');
+  lines.push('                          CONVERSATION TRANSCRIPT                       ');
+  lines.push('═════════════════════════════════════════════════════════════════════════');
   lines.push('');
 
   try {
@@ -1016,21 +1106,27 @@ async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
   const embed = brandEmbed()
     .setTitle('📊 Ticket Statistics')
     .setColor(0x4b4b4b)
+    .setThumbnail(BRAND_ICON)
+    .setDescription(`**${BRAND} Ticket Bot — Live Statistics**\n\nReal-time ticket activity for this server.`)
     .addFields(
-      { name: 'Total tickets', value: String(total), inline: true },
-      { name: 'Currently open', value: String(open), inline: true },
-      { name: 'Closed', value: String(closed), inline: true },
-      { name: 'Reopened (active)', value: String(reopened), inline: true },
-      { name: 'Avg. close time', value: avgMs ? formatDuration(avgMs) : '—', inline: true },
-      { name: 'Next ticket #', value: String(state.count + 1), inline: true },
+      { name: '🎫 Total Tickets', value: `\`${total}\``, inline: true },
+      { name: '🟢 Currently Open', value: `\`${open}\``, inline: true },
+      { name: '🔒 Closed', value: `\`${closed}\``, inline: true },
+      { name: '↩️ Reopened', value: `\`${reopened}\``, inline: true },
+      { name: '⏱️ Avg. Close Time', value: avgMs ? `\`${formatDuration(avgMs)}\`` : '`—`', inline: true },
+      { name: '🔢 Next Ticket #', value: `\`${state.count + 1}\``, inline: true },
     );
 
-  perCat.forEach((c) => {
-    embed.addFields({
-      name: c.label,
-      value: `Total: ${c.total} • Open: ${c.open} • Closed: ${c.closed}`,
-      inline: false,
-    });
+  // Per-category breakdown with a visual bar
+  embed.addFields({
+    name: '📂 Per-Category Breakdown',
+    value: perCat
+      .map((c) => {
+        const pct = c.total > 0 ? Math.round((c.closed / c.total) * 100) : 0;
+        return `${c.label}\n   └ Total: **${c.total}** • Open: **${c.open}** • Closed: **${c.closed}** • Close rate: **${pct}%**`;
+      })
+      .join('\n\n'),
+    inline: false,
   });
 
   await interaction.editReply({ embeds: [embed] });
@@ -1044,24 +1140,11 @@ async function setupPanel(opts: {
   description?: string;
   categories?: Array<Partial<Category> & { id: string }>;
 }): Promise<{ ok: boolean; messageId?: string; channelId?: string; error?: string }> {
-  return setupPanelWithIds(PANEL_CHANNEL_ID, opts);
-}
-
-// Variant that takes an explicit panel channel ID — used by /setup-guild when
-// the channel was just created and PANEL_CHANNEL_ID env var isn't set yet.
-async function setupPanelWithIds(
-  panelChannelId: string,
-  opts: {
-    title?: string;
-    description?: string;
-    categories?: Array<Partial<Category> & { id: string }>;
-  },
-): Promise<{ ok: boolean; messageId?: string; channelId?: string; error?: string }> {
   if (DEMO_MODE) {
     return { ok: false, error: 'Bot is in demo mode (no DISCORD_BOT_TOKEN).' };
   }
   if (!guild) return { ok: false, error: 'Guild not resolved.' };
-  if (!panelChannelId) return { ok: false, error: 'No panel channel ID provided (set TICKET_PANEL_CHANNEL_ID or call /setup-guild first).' };
+  if (!PANEL_CHANNEL_ID) return { ok: false, error: 'TICKET_PANEL_CHANNEL_ID not set. Configure it in your Render environment variables.' };
 
   // Optionally replace categories
   if (Array.isArray(opts.categories) && opts.categories.length > 0) {
@@ -1081,20 +1164,55 @@ async function setupPanelWithIds(
   const title = opts.title || `${BRAND_TICKET} — Support Desk`;
   const description =
     opts.description ||
-    `Select a category below to open a private support ticket with the ${BRAND} staff team. Our team will respond as soon as possible.`;
+    [
+      `Welcome to the **${BRAND}** support desk.`,
+      '',
+      'Select a category from the dropdown below to open a private ticket with our staff team. Our moderators will respond as soon as possible.',
+      '',
+      `📂 **${categories.length} categories available** • ⏱️ **24/7 support** • 🔒 **Private channels**`,
+    ].join('\n');
+
+  // Build the categories list with cleaner formatting
+  const categoryList = categories
+    .map((c) => `${c.emoji}  **${c.label}**\n     └ *${c.description}*`)
+    .join('\n\n');
 
   const embed = brandEmbed()
-    .setTitle(title)
+    .setTitle(`🎫 ${title}`)
     .setDescription(description)
     .setColor(0x2b2b2b)
+    .setThumbnail(BRAND_ICON)
     .addFields(
-      { name: '🎫 Categories', value: categories.map((c) => `${c.emoji} **${c.label}** — ${c.description}`).join('\n'), inline: false },
-      { name: '📋 Rules', value: '• One ticket per issue.\n• Do not ping staff unnecessarily.\n• Abuse may result in a ban from opening future tickets.', inline: false },
+      {
+        name: '📋 Available Categories',
+        value: categoryList,
+        inline: false,
+      },
+      {
+        name: '⚠️ Before Opening a Ticket',
+        value: [
+          '• **One ticket per issue** — don\'t spam multiple tickets.',
+          '• **Be detailed** — include screenshots, steps, and context.',
+          '• **Don\'t ping staff** — they are notified automatically.',
+          '• **Stay on topic** — keep the discussion relevant to your issue.',
+          '• **Abuse** may result in a temporary or permanent ticket ban.',
+        ].join('\n'),
+        inline: false,
+      },
+      {
+        name: '📊 Live Stats',
+        value: [
+          `🎫 Total opened: **${state.tickets.length}**`,
+          `🟢 Currently open: **${state.tickets.filter((t) => t.status !== 'closed').length}**`,
+          `🔒 Closed: **${state.tickets.filter((t) => t.status === 'closed').length}**`,
+        ].join('\n'),
+        inline: false,
+      },
     );
 
   const select = new StringSelectMenuBuilder()
     .setCustomId('icbs_ticket_panel')
-    .setPlaceholder('Select a ticket category…')
+    .setPlaceholder('🎫 Select a ticket category…')
     .setMinValues(1)
     .setMaxValues(1)
     .addOptions(
@@ -1111,7 +1229,7 @@ async function setupPanelWithIds(
   const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
 
   try {
-    const channel = await guild.channels.fetch(panelChannelId);
+    const channel = await guild.channels.fetch(PANEL_CHANNEL_ID);
     if (!channel || channel.type !== ChannelType.GuildText) {
       return { ok: false, error: 'Panel channel not found or not a text channel.' };
     }
@@ -1125,167 +1243,6 @@ async function setupPanelWithIds(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Auto-setup — creates the Discord-side resources (category, channels, roles)
-// if they don't exist yet, OR reuses existing ones matched by name. Returns
-// the IDs so the caller can paste them into Render's env vars.
-//
-// This is invoked by POST /setup-guild. It lets you deploy the bot with ONLY
-// DISCORD_BOT_TOKEN + DISCORD_GUILD_ID + ICBS_WEBHOOK_SECRET configured, then
-// call /setup-guild once to create everything else.
-// ---------------------------------------------------------------------------
-interface SetupGuildResult {
-  ok: boolean;
-  created?: string[];
-  reused?: string[];
-  ids?: {
-    TICKET_CATEGORY_ID: string;
-    TICKET_PANEL_CHANNEL_ID: string;
-    TICKET_LOG_CHANNEL_ID: string;
-    TICKET_ADMIN_ROLE_ID: string;
-    TICKET_STAFF_ROLE_IDS: string;
-  };
-  error?: string;
-}
-
-async function setupGuild(opts: {
-  categoryName?: string;
-  panelChannelName?: string;
-  logsChannelName?: string;
-  adminRoleName?: string;
-  staffRoleName?: string;
-  postPanel?: boolean;
-}): Promise<SetupGuildResult> {
-  if (DEMO_MODE) {
-    return { ok: false, error: 'Bot is in demo mode (no DISCORD_BOT_TOKEN).' };
-  }
-  if (!guild) return { ok: false, error: 'Guild not resolved — set DISCORD_GUILD_ID.' };
-
-  const categoryName = opts.categoryName || '🎫 Tickets';
-  const panelName = opts.panelChannelName || 'ticket-panel';
-  const logsName = opts.logsChannelName || 'ticket-logs';
-  const adminName = opts.adminRoleName || 'ICBS Ticket Bot';
-  const staffName = opts.staffRoleName || 'Support Staff';
-
-  const created: string[] = [];
-  const reused: string[] = [];
-
-  try {
-    // Fetch everything
-    const [channels, roles] = await Promise.all([
-      guild.channels.fetch(),
-      guild.roles.fetch(),
-    ]);
-    const existingCategories = [...channels.values()].filter(
-      (c): c is NonNullable<typeof c> => !!c && c.type === ChannelType.GuildCategory,
-    );
-    const existingTextChannels = [...channels.values()].filter(
-      (c): c is NonNullable<typeof c> => !!c && c.type === ChannelType.GuildText,
-    );
-    const existingRoles = [...roles.values()].filter((r) => r && r.name !== '@everyone');
-
-    // 1. Category
-    let ticketCategory = existingCategories.find(
-      (c) => c.name.toLowerCase() === categoryName.toLowerCase(),
-    );
-    if (ticketCategory) {
-      reused.push(`category "${ticketCategory.name}" (${ticketCategory.id})`);
-    } else {
-      ticketCategory = await guild.channels.create({
-        name: categoryName,
-        type: ChannelType.GuildCategory,
-        reason: 'Ticket bot auto-setup — ticket channel category',
-      });
-      created.push(`category "${ticketCategory.name}" (${ticketCategory.id})`);
-    }
-
-    // 2. Panel channel
-    let panelChannel = existingTextChannels.find(
-      (c) => c.name.toLowerCase() === panelName.toLowerCase(),
-    );
-    if (panelChannel) {
-      reused.push(`channel #${panelChannel.name} (${panelChannel.id})`);
-    } else {
-      panelChannel = await guild.channels.create({
-        name: panelName,
-        type: ChannelType.GuildText,
-        parent: ticketCategory.id,
-        topic: `${BRAND_TICKET} — Support Desk. Select a category to open a ticket.`,
-        reason: 'Ticket bot auto-setup — panel channel',
-      });
-      created.push(`channel #${panelChannel.name} (${panelChannel.id})`);
-    }
-
-    // 3. Logs channel
-    let logsChannel = existingTextChannels.find(
-      (c) => c.name.toLowerCase() === logsName.toLowerCase(),
-    );
-    if (logsChannel) {
-      reused.push(`channel #${logsChannel.name} (${logsChannel.id})`);
-    } else {
-      logsChannel = await guild.channels.create({
-        name: logsName,
-        type: ChannelType.GuildText,
-        parent: ticketCategory.id,
-        topic: `${BRAND_TICKET} — ticket open/close logs and transcripts.`,
-        permissionOverwrites: [
-          {
-            id: guild.roles.everyone.id,
-            deny: [PermissionFlagsBits.ViewChannel],
-          },
-        ],
-        reason: 'Ticket bot auto-setup — logs channel',
-      });
-      created.push(`channel #${logsChannel.name} (${logsChannel.id})`);
-    }
-
-    // 4. Admin role
-    let adminRole = existingRoles.find(
-      (r) => r.name.toLowerCase() === adminName.toLowerCase(),
-    );
-    if (adminRole) {
-      reused.push(`role @${adminRole.name} (${adminRole.id})`);
-    } else {
-      adminRole = await guild.roles.create({
-        name: adminName,
-        permissions: PermissionFlagsBits.Administrator,
-        color: 0x2b2b2b,
-        reason: 'Ticket bot auto-setup — admin role',
-      });
-      created.push(`role @${adminRole.name} (${adminRole.id})`);
-    }
-
-    // 5. Staff role
-    let staffRole = existingRoles.find(
-      (r) => r.name.toLowerCase() === staffName.toLowerCase(),
-    );
-    if (staffRole) {
-      reused.push(`role @${staffRole.name} (${staffRole.id})`);
-    } else {
-      staffRole = await guild.roles.create({
-        name: staffName,
-        color: 0x2ecc71,
-        reason: 'Ticket bot auto-setup — staff role',
-      });
-      created.push(`role @${staffRole.name} (${staffRole.id})`);
-    }
-
-    return {
-      ok: true,
-      created,
-      reused,
-      ids: {
-        TICKET_CATEGORY_ID: ticketCategory.id,
-        TICKET_PANEL_CHANNEL_ID: panelChannel.id,
-        TICKET_LOG_CHANNEL_ID: logsChannel.id,
-        TICKET_ADMIN_ROLE_ID: adminRole.id,
-        TICKET_STAFF_ROLE_IDS: staffRole.id,
-      },
-    };
-  } catch (err: any) {
-    return { ok: false, error: String(err?.message || err) };
-  }
-}
 
 // ---------------------------------------------------------------------------
 // HTTP server
@@ -1404,58 +1361,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // --- POST /setup-guild ---
-  // Auto-creates the Discord-side resources (category, channels, roles) and
-  // returns their IDs. Lets you deploy the bot with only DISCORD_BOT_TOKEN +
-  // DISCORD_GUILD_ID + ICBS_WEBHOOK_SECRET configured, then call this once to
-  // create everything else. Paste the returned IDs into Render's env vars.
-  //
-  // Body (all optional — defaults are used if omitted):
-  //   { categoryName?, panelChannelName?, logsChannelName?,
-  //     adminRoleName?, staffRoleName?, postPanel?: true }
-  if (req.method === 'POST' && pathname === '/setup-guild') {
-    const secret = req.headers['x-icbs-secret'];
-    if (!WEBHOOK_SECRET || secret !== WEBHOOK_SECRET) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'Unauthorized: invalid or missing x-icbs-secret.' }));
-      return;
-    }
-
-    let body = '';
-    for await (const chunk of req) body += chunk;
-    let parsed: any = {};
-    try {
-      parsed = body ? JSON.parse(body) : {};
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'Invalid JSON body.' }));
-      return;
-    }
-
-    const result = await setupGuild({
-      categoryName: parsed.categoryName,
-      panelChannelName: parsed.panelChannelName,
-      logsChannelName: parsed.logsChannelName,
-      adminRoleName: parsed.adminRoleName,
-      staffRoleName: parsed.staffRoleName,
-    });
-
-    // If setup succeeded and the caller asked to auto-post the panel, do that too.
-    if (result.ok && result.ids && parsed.postPanel) {
-      // Temporarily use the discovered IDs for panel posting
-      const panelResult = await setupPanelWithIds(result.ids.TICKET_PANEL_CHANNEL_ID, {
-        title: parsed.title,
-        description: parsed.description,
-        categories: parsed.categories,
-      });
-      (result as any).panel = panelResult;
-    }
-
-    res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(result, null, 2));
-    return;
-  }
-
   // --- 404 ---
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: false, error: `Not found: ${req.method} ${pathname}` }));
@@ -1468,7 +1373,6 @@ server.listen(HTTP_PORT, '0.0.0.0', () => {
   console.log(`[ticket-bot]    GET  /             (root health check — Render default)`);
   console.log(`[ticket-bot]    GET  /ping         (lightweight, no auth)`);
   console.log(`[ticket-bot]    GET  /health       (full status payload)`);
-  console.log(`[ticket-bot]    POST /setup-guild  (auth: x-icbs-secret — auto-create channels + roles)`);
   console.log(`[ticket-bot]    POST /setup-panel  (auth: x-icbs-secret — post the ticket panel)`);
 });
 
