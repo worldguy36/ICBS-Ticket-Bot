@@ -1,0 +1,57 @@
+name: Keep Alive
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    name: Ping bot to prevent spin-down
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Ping /uptime endpoint
+        env:
+          BOT_URL: ${{ secrets.BOT_URL }}
+        run: |
+          if [ -z "$BOT_URL" ]; then
+            echo "❌ BOT_URL secret is not set."
+            echo "   Go to: https://github.com/${{ github.repository }}/settings/secrets/actions"
+            echo "   Add a secret named BOT_URL with your bot's public URL."
+            exit 1
+          fi
+
+          echo "🏓 Pinging $BOT_URL/uptime ..."
+          HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" --max-time 30 "$BOT_URL/uptime" || echo "000")
+          BODY=$(cat /tmp/response.txt 2>/dev/null || echo "(no response)")
+
+          echo "HTTP status: $HTTP_CODE"
+          echo "Response body: $BODY"
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Bot is alive and responding."
+          else
+            echo "⚠️ Bot responded with HTTP $HTTP_CODE (expected 200)."
+            echo "   This might just be a cold start — retrying in 30s..."
+            sleep 30
+            HTTP_CODE2=$(curl -s -o /tmp/response2.txt -w "%{http_code}" --max-time 30 "$BOT_URL/uptime" || echo "000")
+            echo "Retry HTTP status: $HTTP_CODE2"
+            echo "Retry response: $(cat /tmp/response2.txt 2>/dev/null)"
+            if [ "$HTTP_CODE2" = "200" ]; then
+              echo "✅ Retry succeeded — bot is alive."
+            else
+              echo "❌ Retry also failed. Check the bot's logs."
+            fi
+          fi
+
+      - name: Ping /health (for logging)
+        env:
+          BOT_URL: ${{ secrets.BOT_URL }}
+        run: |
+          if [ -z "$BOT_URL" ]; then
+            exit 0
+          fi
+          echo "📊 Fetching /health for status log..."
+          curl -s --max-time 30 "$BOT_URL/health" 2>/dev/null | jq '{mode, ready, uptime, openTickets: .stats.openTickets, totalTickets: .stats.totalTickets}' 2>/dev/null || echo "(health fetch failed)"
