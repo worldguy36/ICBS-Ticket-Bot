@@ -86,10 +86,15 @@ const PANEL_CHANNEL_ID = process.env.TICKET_PANEL_CHANNEL_ID || '';
 const LOG_CHANNEL_ID = process.env.TICKET_LOG_CHANNEL_ID || '';
 const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || '';
 const ADMIN_ROLE_ID = process.env.TICKET_ADMIN_ROLE_ID || '';
-const STAFF_ROLE_IDS = (process.env.TICKET_STAFF_ROLE_IDS || '')
+// Initial staff role IDs from env. This is mutable at runtime via /ticket-staff
+// command — changes persist to tickets.json and override the env var.
+const INITIAL_STAFF_ROLE_IDS = (process.env.TICKET_STAFF_ROLE_IDS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+// Mutable — updated by /ticket-staff add/remove. Loaded from state file on
+// startup, falling back to the env var on first boot.
+let staffRoleIds: string[] = [...INITIAL_STAFF_ROLE_IDS];
 // Render web services set PORT automatically. Use it when present so the
 // service binds to the port Render expects. Otherwise fall back to
 // ICBS_BOT_PORT (default 3040) for local dev / detached-child mode.
@@ -162,7 +167,7 @@ try {
 let categories: Category[] = [...DEFAULT_CATEGORIES];
 
 function categoryStaffRoleId(cat: Category): string | undefined {
-  return cat.staffRoleId || categoryRoles[cat.id] || STAFF_ROLE_IDS[0];
+  return cat.staffRoleId || categoryRoles[cat.id] || staffRoleIds[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +358,7 @@ interface PersistedState {
   tickets: TicketRecord[];
   panelMessageId: string | null;
   panelChannelId: string | null;
+  staffRoleIds?: string[]; // optional — falls back to env var if absent
 }
 
 function loadState(): PersistedState {
@@ -365,6 +371,7 @@ function loadState(): PersistedState {
         tickets: Array.isArray(parsed.tickets) ? parsed.tickets : [],
         panelMessageId: parsed.panelMessageId || null,
         panelChannelId: parsed.panelChannelId || null,
+        staffRoleIds: Array.isArray(parsed.staffRoleIds) ? parsed.staffRoleIds : undefined,
       };
     }
   } catch (err) {
@@ -383,6 +390,15 @@ function saveState() {
 
 const state: PersistedState = loadState();
 
+// If the state file has a saved staffRoleIds list, use it (overrides env var).
+// Otherwise fall back to the env var value (INITIAL_STAFF_ROLE_IDS).
+if (Array.isArray(state.staffRoleIds) && state.staffRoleIds.length >= 0) {
+  staffRoleIds = state.staffRoleIds;
+  console.log(`[ticket-bot] 📋 Loaded ${staffRoleIds.length} staff role(s) from tickets.json (overrides env var).`);
+} else {
+  console.log(`[ticket-bot] 📋 Using ${staffRoleIds.length} staff role(s) from TICKET_STAFF_ROLE_IDS env var.`);
+}
+
 // In-memory cooldowns (not persisted — that's fine, they reset on restart)
 const openCooldowns = new Map<string, number>(); // userId -> epoch ms of last open
 
@@ -392,7 +408,7 @@ const openCooldowns = new Map<string, number>(); // userId -> epoch ms of last o
 function isStaff(member: { roles: { cache: { has: (id: string) => boolean } } } | null | undefined): boolean {
   if (!member) return false;
   if (ADMIN_ROLE_ID && member.roles.cache.has(ADMIN_ROLE_ID)) return true;
-  return STAFF_ROLE_IDS.some((r) => member.roles.cache.has(r));
+  return staffRoleIds.some((r) => member.roles.cache.has(r));
 }
 
 function categoryById(id: string): Category | undefined {
@@ -488,14 +504,14 @@ client.once(Events.ClientReady, async (c) => {
     ['TICKET_LOG_CHANNEL_ID', !!LOG_CHANNEL_ID, 'Channel for ticket open/close logs + transcripts'],
     ['TICKET_CATEGORY_ID', !!TICKET_CATEGORY_ID, 'Discord category ticket channels are created under'],
     ['TICKET_ADMIN_ROLE_ID', !!ADMIN_ROLE_ID, 'Role with full access to ALL tickets'],
-    ['TICKET_STAFF_ROLE_IDS', STAFF_ROLE_IDS.length > 0, 'Comma-separated staff role IDs added to tickets'],
+    ['TICKET_STAFF_ROLE_IDS', staffRoleIds.length > 0, `Comma-separated staff role IDs (${staffRoleIds.length} loaded — use /ticket-staff to manage)`],
     ['ICBS_WEBHOOK_SECRET', !!WEBHOOK_SECRET, 'Secret for /setup-panel auth (REQUIRED)'],
   ];
   for (const [key, ok, hint] of configChecks) {
     console.log(`  ${ok ? '✅' : '⚠️ '} ${key.padEnd(28)} ${ok ? 'set' : 'NOT SET'}  — ${hint}`);
   }
   console.log('─'.repeat(60));
-  if (!PANEL_CHANNEL_ID || !LOG_CHANNEL_ID || !TICKET_CATEGORY_ID || !ADMIN_ROLE_ID || !STAFF_ROLE_IDS.length) {
+  if (!PANEL_CHANNEL_ID || !LOG_CHANNEL_ID || !TICKET_CATEGORY_ID || !ADMIN_ROLE_ID || !staffRoleIds.length) {
     console.log('💡 Configure the missing IDs in your Render web service → Environment tab.');
     console.log('   To find a Discord ID: enable Developer Mode (Discord settings → Advanced),');
     console.log('   then right-click the channel/category/role → Copy ID.');
@@ -614,6 +630,25 @@ async function registerSlashCommands() {
       .setDescription('Show all ticket bot commands (staff only).')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
       .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ticket-staff')
+      .setDescription('Manage which roles count as ticket support staff (admin only).')
+      .addStringOption((opt) =>
+        opt
+          .setName('action')
+          .setDescription('add, remove, or list staff roles')
+          .setRequired(true)
+          .addChoices(
+            { name: 'add', value: 'add' },
+            { name: 'remove', value: 'remove' },
+            { name: 'list', value: 'list' },
+          ),
+      )
+      .addRoleOption((opt) =>
+        opt.setName('role').setDescription('The role to add or remove (required for add/remove).').setRequired(false),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+      .toJSON(),
   ];
   const rest = new REST({ version: '10' }).setToken(TOKEN);
   await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), {
@@ -656,6 +691,9 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
           return;
         case 'ticket-help':
           await handleHelpCommand(interaction);
+          return;
+        case 'ticket-staff':
+          await handleStaffCommand(interaction);
           return;
       }
     }
@@ -1687,6 +1725,11 @@ async function handleHelpCommand(interaction: ChatInputCommandInteraction) {
         inline: false,
       },
       {
+        name: '👥 `/ticket-staff` (admin only)',
+        value: 'Manage which roles count as ticket support staff. Actions: `add`, `remove`, `list`.\nExamples:\n• `/ticket-staff action:add role:@Support`\n• `/ticket-staff action:remove role:@Support`\n• `/ticket-staff action:list`\n\nChanges are persisted and survive restarts.',
+        inline: false,
+      },
+      {
         name: '📋 Button Actions (in ticket channels)',
         value: [
           '• **📋 Claim Ticket** — claim the ticket (staff only).',
@@ -1699,6 +1742,148 @@ async function handleHelpCommand(interaction: ChatInputCommandInteraction) {
     );
 
   await interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+// ---------------------------------------------------------------------------
+// /ticket-staff slash command — manage which roles count as support staff
+// ---------------------------------------------------------------------------
+async function handleStaffCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guild) return;
+
+  // Only admins (TICKET_ADMIN_ROLE_ID) can manage staff roles.
+  // Falls back to ManageRoles permission if no admin role is configured.
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const isAdmin = (ADMIN_ROLE_ID && member?.roles.cache.has(ADMIN_ROLE_ID)) || (member?.permissions.has(PermissionFlagsBits.ManageRoles) ?? false);
+  if (!isAdmin) {
+    await interaction.reply({
+      content: '🚫 Only ticket admins can manage staff roles.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const action = interaction.options.getString('action', true);
+  const role = interaction.options.getRole('role');
+
+  if (action === 'list') {
+    if (staffRoleIds.length === 0) {
+      await interaction.reply({
+        content: '📋 **No staff roles are currently configured.**\n\nUse `/ticket-staff action:add role:@SomeRole` to add one.',
+        ephemeral: true,
+      });
+      return;
+    }
+    // Resolve role IDs to names (best-effort — some may have been deleted)
+    const lines: string[] = [];
+    for (const id of staffRoleIds) {
+      try {
+        const r = await interaction.guild.roles.fetch(id);
+        lines.push(`• ${r ? `<@&${r.id}> (\`${r.name}\`)` : `~~deleted role~~ (\`${id}\`)`}`);
+      } catch {
+        lines.push(`• ~~deleted role~~ (\`${id}\`)`);
+      }
+    }
+    const embed = brandEmbed()
+      .setTitle('📋 Current Staff Roles')
+      .setColor(0x2ecc71)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`${staffRoleIds.length} role(s) currently count as ticket support staff:\n\n${lines.join('\n')}`)
+      .addFields({
+        name: '💡 Manage',
+        value: '• `/ticket-staff action:add role:@Role` — add a staff role\n• `/ticket-staff action:remove role:@Role` — remove a staff role\n• `/ticket-staff action:list` — show this list',
+        inline: false,
+      });
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+    return;
+  }
+
+  // add or remove
+  if (!role) {
+    await interaction.reply({
+      content: '⚠️ You must specify a role. Example: `/ticket-staff action:add role:@Support`',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (action === 'add') {
+    if (staffRoleIds.includes(role.id)) {
+      await interaction.reply({
+        content: `⚠️ <@&${role.id}> (\`${role.name}\`) is already a staff role.`,
+        ephemeral: true,
+      });
+      return;
+    }
+    staffRoleIds.push(role.id);
+    state.staffRoleIds = staffRoleIds;
+    saveState();
+
+    const embed = brandEmbed()
+      .setTitle('✅ Staff Role Added')
+      .setColor(0x2ecc71)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`<@&${role.id}> (\`${role.name}\`) is now a ticket support staff role.`)
+      .addFields(
+        { name: '📊 Total staff roles', value: String(staffRoleIds.length), inline: true },
+        { name: '👤 Added by', value: `<@${interaction.user.id}>`, inline: true },
+      )
+      .setFooter({ text: 'Changes are persisted to tickets.json and survive restarts.' });
+    await interaction.reply({ embeds: [embed] });
+
+    // Log it
+    const logEmbed = brandEmbed()
+      .setTitle('➕ Staff Role Added')
+      .setColor(0x2ecc71)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`A new staff role was added by <@${interaction.user.id}>.`)
+      .addFields(
+        { name: 'Role', value: `<@&${role.id}> (\`${role.name}\`)`, inline: true },
+        { name: 'Added by', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+        { name: 'Total staff roles', value: String(staffRoleIds.length), inline: true },
+      );
+    await sendToLogChannel(interaction.guild, { embeds: [logEmbed] });
+    return;
+  }
+
+  if (action === 'remove') {
+    const idx = staffRoleIds.indexOf(role.id);
+    if (idx === -1) {
+      await interaction.reply({
+        content: `⚠️ <@&${role.id}> (\`${role.name}\`) is not currently a staff role.`,
+        ephemeral: true,
+      });
+      return;
+    }
+    staffRoleIds.splice(idx, 1);
+    state.staffRoleIds = staffRoleIds;
+    saveState();
+
+    const embed = brandEmbed()
+      .setTitle('🗑️ Staff Role Removed')
+      .setColor(0xe74c3c)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`<@&${role.id}> (\`${role.name}\`) is no longer a ticket support staff role.`)
+      .addFields(
+        { name: '📊 Remaining staff roles', value: String(staffRoleIds.length), inline: true },
+        { name: '👤 Removed by', value: `<@${interaction.user.id}>`, inline: true },
+      )
+      .setFooter({ text: 'Changes are persisted to tickets.json and survive restarts.' });
+    await interaction.reply({ embeds: [embed] });
+
+    // Log it
+    const logEmbed = brandEmbed()
+      .setTitle('➖ Staff Role Removed')
+      .setColor(0xe74c3c)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`A staff role was removed by <@${interaction.user.id}>.`)
+      .addFields(
+        { name: 'Role', value: `<@&${role.id}> (\`${role.name}\`)`, inline: true },
+        { name: 'Removed by', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+        { name: 'Remaining staff roles', value: String(staffRoleIds.length), inline: true },
+      );
+    await sendToLogChannel(interaction.guild, { embeds: [logEmbed] });
+    return;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1917,7 +2102,7 @@ function generateStatusPage(): string {
     ['TICKET_LOG_CHANNEL_ID', !!LOG_CHANNEL_ID, 'Log channel'],
     ['TICKET_CATEGORY_ID', !!TICKET_CATEGORY_ID, 'Ticket category'],
     ['TICKET_ADMIN_ROLE_ID', !!ADMIN_ROLE_ID, 'Admin role'],
-    ['TICKET_STAFF_ROLE_IDS', STAFF_ROLE_IDS.length > 0, 'Staff roles'],
+    ['TICKET_STAFF_ROLE_IDS', staffRoleIds.length > 0, `Staff roles (${staffRoleIds.length} loaded)`],
     ['ICBS_WEBHOOK_SECRET', !!WEBHOOK_SECRET, 'Webhook secret'],
     ['ICBS_PUBLIC_URL', !!PUBLIC_URL, 'Public URL (for logo)'],
   ];
@@ -2303,7 +2488,7 @@ const server = http.createServer(async (req, res) => {
         logChannel: !!LOG_CHANNEL_ID,
         ticketCategory: !!TICKET_CATEGORY_ID,
         adminRole: !!ADMIN_ROLE_ID,
-        staffRoles: STAFF_ROLE_IDS.length,
+        staffRoles: staffRoleIds.length,
         webhookSecret: !!WEBHOOK_SECRET,
       },
       stats: {
