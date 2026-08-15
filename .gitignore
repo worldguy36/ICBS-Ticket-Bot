@@ -9,7 +9,6 @@ node_modules/
 # Local-only directories (sandbox state, not part of the project)
 skills/
 upload/
-download/
 
 # Bot runtime state
 mini-services/icbs-ticket-bot/tickets.json
