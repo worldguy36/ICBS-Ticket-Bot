@@ -351,6 +351,11 @@ interface TicketRecord {
   messageCount: number;
   status: 'open' | 'closed' | 'reopened';
   reopenWindowUntil: number | null; // epoch ms — channel can be reopened before this
+  firstResponseAt: number | null; // when staff first replied (null = no response yet)
+  firstResponderId: string | null;
+  firstResponderTag: string | null;
+  lastActivityAt: number; // last message in the ticket channel (epoch ms)
+  inactivityWarnedAt: number | null; // when the bot warned about inactivity (null = not warned)
 }
 
 interface PersistedState {
@@ -359,6 +364,7 @@ interface PersistedState {
   panelMessageId: string | null;
   panelChannelId: string | null;
   staffRoleIds?: string[]; // optional — falls back to env var if absent
+  blacklistedUserIds?: string[]; // users blocked from opening tickets
 }
 
 function loadState(): PersistedState {
@@ -372,12 +378,13 @@ function loadState(): PersistedState {
         panelMessageId: parsed.panelMessageId || null,
         panelChannelId: parsed.panelChannelId || null,
         staffRoleIds: Array.isArray(parsed.staffRoleIds) ? parsed.staffRoleIds : undefined,
+        blacklistedUserIds: Array.isArray(parsed.blacklistedUserIds) ? parsed.blacklistedUserIds : [],
       };
     }
   } catch (err) {
     console.warn('[ticket-bot] failed to load tickets.json, starting fresh:', err);
   }
-  return { count: 0, tickets: [], panelMessageId: null, panelChannelId: null };
+  return { count: 0, tickets: [], panelMessageId: null, panelChannelId: null, blacklistedUserIds: [] };
 }
 
 function saveState() {
@@ -541,8 +548,26 @@ client.on(Events.MessageCreate, async (msg) => {
   if (!msg.guild) return;
   const t = ticketByChannel(msg.channelId);
   if (!t) return;
+  const now = Date.now();
   t.messageCount += 1;
-  // Don't save on every message — periodic save below
+  t.lastActivityAt = now;
+
+  // Track first staff response (opener doesn't count)
+  if (t.firstResponseAt === null && msg.author.id !== t.openerId) {
+    // Check if the author is staff (best-effort — fetch member)
+    try {
+      const member = await msg.guild.members.fetch(msg.author.id).catch(() => null);
+      if (member && isStaff(member)) {
+        t.firstResponseAt = now;
+        t.firstResponderId = msg.author.id;
+        t.firstResponderTag = msg.author.tag;
+        saveState();
+        console.log(`[ticket-bot] 📝 Ticket #${t.id}: first response by ${msg.author.tag} after ${formatDuration(now - t.openedAt)}`);
+      }
+    } catch {
+      // ignore — don't let member fetch failures break message tracking
+    }
+  }
 });
 
 // When a ticket channel is deleted (manually by staff OR by the bot itself),
@@ -649,6 +674,41 @@ async function registerSlashCommands() {
       )
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
       .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ticket-rename')
+      .setDescription('Rename the current ticket channel (staff only).')
+      .addStringOption((opt) =>
+        opt.setName('name').setDescription('New channel name (no spaces, use dashes).').setRequired(true),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ticket-info')
+      .setDescription('Show details about a ticket by its ID (staff only).')
+      .addIntegerOption((opt) =>
+        opt.setName('id').setDescription('The ticket ID number (e.g. 5 for #5).').setRequired(true),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ticket-blacklist')
+      .setDescription('Block a user from opening tickets (admin only).')
+      .addStringOption((opt) =>
+        opt
+          .setName('action')
+          .setDescription('add, remove, or list blacklisted users')
+          .setRequired(true)
+          .addChoices(
+            { name: 'add', value: 'add' },
+            { name: 'remove', value: 'remove' },
+            { name: 'list', value: 'list' },
+          ),
+      )
+      .addUserOption((opt) =>
+        opt.setName('user').setDescription('The user to block/unblock (required for add/remove).').setRequired(false),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+      .toJSON(),
   ];
   const rest = new REST({ version: '10' }).setToken(TOKEN);
   await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), {
@@ -695,6 +755,15 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         case 'ticket-staff':
           await handleStaffCommand(interaction);
           return;
+        case 'ticket-rename':
+          await handleRenameCommand(interaction);
+          return;
+        case 'ticket-info':
+          await handleInfoCommand(interaction);
+          return;
+        case 'ticket-blacklist':
+          await handleBlacklistCommand(interaction);
+          return;
       }
     }
   } catch (err) {
@@ -724,6 +793,16 @@ async function handlePanelSelect(interaction: StringSelectMenuInteraction) {
   const cat = categoryById(catId);
   if (!cat) {
     await interaction.reply({ content: '⚠️ Unknown ticket category.', ephemeral: true });
+    return;
+  }
+
+  // Blacklist check (fail fast — before showing the modal)
+  const blacklist = state.blacklistedUserIds || [];
+  if (blacklist.includes(userId)) {
+    await interaction.reply({
+      content: '🚫 You are blocked from opening tickets. If you believe this is a mistake, please contact a staff member directly.',
+      ephemeral: true,
+    });
     return;
   }
 
@@ -888,15 +967,25 @@ async function createTicketFromModal(interaction: ModalSubmitInteraction) {
     messageCount: 0,
     status: 'open',
     reopenWindowUntil: null,
+    firstResponseAt: null,
+    firstResponderId: null,
+    firstResponderTag: null,
+    lastActivityAt: now,
+    inactivityWarnedAt: null,
   };
   state.tickets.push(ticket);
   openCooldowns.set(userId, now);
   saveState();
 
-  // Build the submission summary for the embed
-  const submissionSummary = answers
+  // Build the submission summary for the embed (Discord limits field values
+  // to 1024 chars — truncate safely if the user wrote a lot).
+  const MAX_FIELD = 1000; // leave headroom for the truncation notice
+  let submissionSummary = answers
     .map((a) => `**${a.label}**\n${a.value}`)
     .join('\n\n');
+  if (submissionSummary.length > MAX_FIELD) {
+    submissionSummary = submissionSummary.slice(0, MAX_FIELD - 50) + '\n\n*(...truncated — see full message above)*';
+  }
 
   // Build the opening embed + buttons (enhanced UI)
   const embed = brandEmbed()
@@ -1730,12 +1819,37 @@ async function handleHelpCommand(interaction: ChatInputCommandInteraction) {
         inline: false,
       },
       {
+        name: '✏️ `/ticket-rename`',
+        value: 'Rename the current ticket channel. Run inside a ticket channel.\nExample: `/ticket-rename name:urgent-bug`',
+        inline: false,
+      },
+      {
+        name: 'ℹ️ `/ticket-info`',
+        value: 'Show details about any ticket by ID — opener, status, claimer, first response time, last activity, close reason.\nExample: `/ticket-info id:5`',
+        inline: false,
+      },
+      {
+        name: '🚫 `/ticket-blacklist` (admin only)',
+        value: 'Block a user from opening tickets. Actions: `add`, `remove`, `list`.\nExamples:\n• `/ticket-blacklist action:add user:@spammer`\n• `/ticket-blacklist action:remove user:@spammer`\n• `/ticket-blacklist action:list`',
+        inline: false,
+      },
+      {
         name: '📋 Button Actions (in ticket channels)',
         value: [
           '• **📋 Claim Ticket** — claim the ticket (staff only).',
           '• **🔒 Close Ticket** — close immediately (staff or opener).',
           '• **🔴 Close + Reason** — close with a reason modal (staff only).',
           '• **↩️ Reopen Ticket** — reopen within 60s of closing (staff only).',
+        ].join('\n'),
+        inline: false,
+      },
+      {
+        name: '⏰ Auto-Close (inactivity)',
+        value: [
+          '• Tickets with **no staff response** for 7 days → bot posts a warning.',
+          '• If still no response 3 days later → auto-close + delete channel.',
+          '• Tickets with no response for 14 days → immediate auto-close.',
+          '• All auto-closes are logged in #ticket-logs.',
         ].join('\n'),
         inline: false,
       },
@@ -1887,6 +2001,217 @@ async function handleStaffCommand(interaction: ChatInputCommandInteraction) {
 }
 
 // ---------------------------------------------------------------------------
+// /ticket-rename slash command — rename the current ticket channel
+// ---------------------------------------------------------------------------
+async function handleRenameCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guild || !interaction.channel) {
+    await interaction.reply({ content: '⚠️ This command can only be used in a server text channel.', ephemeral: true });
+    return;
+  }
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!isStaff(member)) {
+    await interaction.reply({ content: '🚫 Only staff can use this command.', ephemeral: true });
+    return;
+  }
+
+  const ticket = ticketByChannel(interaction.channelId);
+  if (!ticket) {
+    await interaction.reply({ content: '⚠️ This command can only be used inside a ticket channel.', ephemeral: true });
+    return;
+  }
+
+  const newName = interaction.options.getString('name', true).trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-_]/g, '').slice(0, 100);
+  if (!newName) {
+    await interaction.reply({ content: '⚠️ Invalid name. Use letters, numbers, dashes, and underscores only.', ephemeral: true });
+    return;
+  }
+
+  const channel = interaction.channel as TextChannel;
+  try {
+    const oldName = channel.name;
+    await channel.setName(newName, `Renamed by ${interaction.user.tag} via /ticket-rename`);
+    await interaction.reply({
+      content: `✅ Ticket channel renamed from \`${oldName}\` to \`${newName}\` by <@${interaction.user.id}>.`,
+    });
+  } catch (err: any) {
+    await interaction.reply({ content: `❌ Failed to rename: ${err?.message || err}`, ephemeral: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// /ticket-info slash command — show details about a ticket by ID
+// ---------------------------------------------------------------------------
+async function handleInfoCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guild) return;
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!isStaff(member)) {
+    await interaction.reply({ content: '🚫 Only staff can use this command.', ephemeral: true });
+    return;
+  }
+
+  const ticketId = interaction.options.getInteger('id', true);
+  const ticket = state.tickets.find((t) => t.id === ticketId);
+  if (!ticket) {
+    await interaction.reply({ content: `⚠️ Ticket #${ticketId} not found.`, ephemeral: true });
+    return;
+  }
+
+  const cat = categoryById(ticket.categoryId);
+  const now = Date.now();
+  const duration = ticket.closedAt ? ticket.closedAt - ticket.openedAt : now - ticket.openedAt;
+  const firstResponseMs = ticket.firstResponseAt ? ticket.firstResponseAt - ticket.openedAt : null;
+
+  const embed = brandEmbed()
+    .setTitle(`🎫 Ticket #${ticket.id} Info`)
+    .setColor(ticket.status === 'closed' ? 0x2b2b2b : cat?.color || 0x4b4b4b)
+    .setThumbnail(BRAND_ICON)
+    .addFields(
+      { name: '📂 Category', value: `${cat?.emoji || '🎫'} ${cat?.label || ticket.categoryLabel}`, inline: true },
+      { name: '🔴 Status', value: ticket.status.toUpperCase(), inline: true },
+      { name: '⏱️ Duration', value: formatDuration(duration), inline: true },
+      { name: '👤 Opener', value: `<@${ticket.openerId}>\n\`${ticket.openerTag}\``, inline: true },
+      { name: '📋 Claimed by', value: ticket.claimedByTag ? `<@${ticket.claimedById}>\n\`${ticket.claimedByTag}\`` : '— *unclaimed* —', inline: true },
+      { name: '📝 First response', value: firstResponseMs !== null ? `\`${formatDuration(firstResponseMs)}\` by <@${ticket.firstResponderId}>\n\`${ticket.firstResponderTag}\`` : '— *no staff response* —', inline: true },
+      { name: '⏰ Opened', value: `<t:${Math.floor(ticket.openedAt / 1000)}:F>\n(<t:${Math.floor(ticket.openedAt / 1000)}:R>)`, inline: true },
+      ...(ticket.closedAt ? [{ name: '🔒 Closed', value: `<t:${Math.floor(ticket.closedAt / 1000)}:F>\n(<t:${Math.floor(ticket.closedAt / 1000)}:R>)`, inline: true }] : []),
+      ...(ticket.closerId ? [{ name: '🔨 Closed by', value: `<@${ticket.closerId}>\n\`${ticket.closerTag}\``, inline: true }] : []),
+      { name: '💬 Messages', value: String(ticket.messageCount), inline: true },
+      { name: '🕐 Last activity', value: `<t:${Math.floor(ticket.lastActivityAt / 1000)}:R>`, inline: true },
+      ...(ticket.channelId ? [{ name: '🎫 Channel', value: `<#${ticket.channelId}>`, inline: true }] : []),
+      ...(ticket.closeReason ? [{ name: '📝 Close reason', value: ticket.closeReason, inline: false }] : []),
+    );
+
+  await interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+// ---------------------------------------------------------------------------
+// /ticket-blacklist slash command — block users from opening tickets
+// ---------------------------------------------------------------------------
+async function handleBlacklistCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guild) return;
+
+  // Admin-only
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const isAdmin = (ADMIN_ROLE_ID && member?.roles.cache.has(ADMIN_ROLE_ID)) || (member?.permissions.has(PermissionFlagsBits.ManageRoles) ?? false);
+  if (!isAdmin) {
+    await interaction.reply({ content: '🚫 Only admins can manage the blacklist.', ephemeral: true });
+    return;
+  }
+
+  const action = interaction.options.getString('action', true);
+  const user = interaction.options.getUser('user');
+
+  const blacklist = state.blacklistedUserIds || [];
+
+  if (action === 'list') {
+    if (blacklist.length === 0) {
+      await interaction.reply({ content: '📋 **No users are currently blacklisted.**', ephemeral: true });
+      return;
+    }
+    const lines: string[] = [];
+    for (const id of blacklist) {
+      try {
+        const u = await client.users.fetch(id).catch(() => null);
+        lines.push(`• ${u ? `<@${u.id}> (\`${u.tag}\`)` : `~~deleted user~~ (\`${id}\`)`}`);
+      } catch {
+        lines.push(`• ~~deleted user~~ (\`${id}\`)`);
+      }
+    }
+    const embed = brandEmbed()
+      .setTitle('🚫 Blacklisted Users')
+      .setColor(0xe74c3c)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`${blacklist.length} user(s) are blocked from opening tickets:\n\n${lines.join('\n')}`);
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+    return;
+  }
+
+  if (!user) {
+    await interaction.reply({ content: '⚠️ You must specify a user. Example: `/ticket-blacklist action:add user:@someone`', ephemeral: true });
+    return;
+  }
+
+  // Don't let admins blacklist themselves or other staff
+  if (user.id === interaction.user.id) {
+    await interaction.reply({ content: '⚠️ You cannot blacklist yourself.', ephemeral: true });
+    return;
+  }
+  const targetMember = await interaction.guild.members.fetch(user.id).catch(() => null);
+  if (targetMember && isStaff(targetMember)) {
+    await interaction.reply({ content: '⚠️ You cannot blacklist a staff member. Remove their staff role first.', ephemeral: true });
+    return;
+  }
+
+  if (action === 'add') {
+    if (blacklist.includes(user.id)) {
+      await interaction.reply({ content: `⚠️ <@${user.id}> is already blacklisted.`, ephemeral: true });
+      return;
+    }
+    blacklist.push(user.id);
+    state.blacklistedUserIds = blacklist;
+    saveState();
+
+    const embed = brandEmbed()
+      .setTitle('🚫 User Blacklisted')
+      .setColor(0xe74c3c)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`<@${user.id}> (\`${user.tag}\`) can no longer open tickets.`)
+      .addFields(
+        { name: '👤 Blacklisted by', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+        { name: '📊 Total blacklisted', value: String(blacklist.length), inline: true },
+      );
+    await interaction.reply({ embeds: [embed] });
+
+    // Log it
+    const logEmbed = brandEmbed()
+      .setTitle('➕ User Blacklisted')
+      .setColor(0xe74c3c)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`<@${user.id}> was blocked from opening tickets.`)
+      .addFields(
+        { name: 'User', value: `<@${user.id}>\n\`${user.tag}\``, inline: true },
+        { name: 'By', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+      );
+    await sendToLogChannel(interaction.guild, { embeds: [logEmbed] });
+    return;
+  }
+
+  if (action === 'remove') {
+    const idx = blacklist.indexOf(user.id);
+    if (idx === -1) {
+      await interaction.reply({ content: `⚠️ <@${user.id}> is not currently blacklisted.`, ephemeral: true });
+      return;
+    }
+    blacklist.splice(idx, 1);
+    state.blacklistedUserIds = blacklist;
+    saveState();
+
+    const embed = brandEmbed()
+      .setTitle('✅ User Unblacklisted')
+      .setColor(0x2ecc71)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`<@${user.id}> (\`${user.tag}\`) can now open tickets again.`)
+      .addFields(
+        { name: '👤 Unblacklisted by', value: `<@${interaction.user.id}>`, inline: true },
+        { name: '📊 Total blacklisted', value: String(blacklist.length), inline: true },
+      );
+    await interaction.reply({ embeds: [embed] });
+
+    const logEmbed = brandEmbed()
+      .setTitle('➖ User Unblacklisted')
+      .setColor(0x2ecc71)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`<@${user.id}> was unblocked from opening tickets.`)
+      .addFields(
+        { name: 'User', value: `<@${user.id}>\n\`${user.tag}\``, inline: true },
+        { name: 'By', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+      );
+    await sendToLogChannel(interaction.guild, { embeds: [logEmbed] });
+    return;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // /ticket-stats slash command
 // ---------------------------------------------------------------------------
 async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
@@ -1908,6 +2233,13 @@ async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
   const avgMs = closedWithTime.length
     ? closedWithTime.reduce((acc, t) => acc + ((t.closedAt as number) - t.openedAt), 0) / closedWithTime.length
     : 0;
+
+  // Average first-response time (tickets where staff responded)
+  const respondedTickets = state.tickets.filter((t) => t.firstResponseAt !== null);
+  const avgResponseMs = respondedTickets.length
+    ? respondedTickets.reduce((acc, t) => acc + ((t.firstResponseAt as number) - t.openedAt), 0) / respondedTickets.length
+    : 0;
+  const unrespondedOpen = state.tickets.filter((t) => t.status !== 'closed' && t.firstResponseAt === null).length;
 
   // Per-category counts
   const perCat = categories.map((c) => {
@@ -1932,6 +2264,9 @@ async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
       { name: '↩️ Reopened', value: `\`${reopened}\``, inline: true },
       { name: '⏱️ Avg. Close Time', value: avgMs ? `\`${formatDuration(avgMs)}\`` : '`—`', inline: true },
       { name: '🔢 Next Ticket #', value: `\`${state.count + 1}\``, inline: true },
+      { name: '⚡ Avg. First Response', value: avgResponseMs ? `\`${formatDuration(avgResponseMs)}\`` : '`—`', inline: true },
+      { name: '⚠️ Unresponded (open)', value: `\`${unrespondedOpen}\``, inline: true },
+      { name: '🚫 Blacklisted users', value: `\`${(state.blacklistedUserIds || []).length}\``, inline: true },
     );
 
   // Per-category breakdown with a visual bar
@@ -2614,3 +2949,150 @@ setInterval(() => {
   }
   if (changed) saveState();
 }, 60_000).unref();
+
+// ---------------------------------------------------------------------------
+// Inactivity auto-close checker — runs every hour.
+// Tickets open for >7 days with no staff response → warn in channel.
+// Tickets open for >14 days with no staff response → auto-close with reason.
+// Tickets warned but still inactive for 3 more days → auto-close.
+// ---------------------------------------------------------------------------
+const INACTIVITY_WARN_MS = 7 * 24 * 60 * 60 * 1000;   // 7 days
+const INACTIVITY_CLOSE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+const INACTIVITY_CLOSE_AFTER_WARN_MS = 3 * 24 * 60 * 60 * 1000; // 3 days after warn
+
+setInterval(async () => {
+  if (!guild) return;
+  const now = Date.now();
+  for (const t of state.tickets) {
+    if (t.status === 'closed' || !t.channelId) continue;
+    if (t.firstResponseAt !== null) continue; // staff responded, don't auto-close
+    const idleMs = now - t.lastActivityAt;
+
+    // Auto-close if open >14 days with no staff response
+    if (idleMs >= INACTIVITY_CLOSE_MS) {
+      try {
+        const channel = await guild.channels.fetch(t.channelId).catch(() => null);
+        if (channel && channel.isTextBased()) {
+          await (channel as TextChannel).send({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(0xe74c3c)
+                .setTitle(`⏰ Ticket #${t.id} auto-closed (inactivity)`)
+                .setDescription('This ticket has been open for 14+ days with no staff response and is being auto-closed. Please open a new ticket if you still need help.')
+                .setFooter({ text: 'Auto-close — 𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 Ticket Bot' }),
+            ],
+          });
+          // Run the standard close flow with the inactivity reason
+          // (but without staff — mark as closed by system)
+          t.status = 'closed';
+          t.closedAt = now;
+          t.closerId = null;
+          t.closerTag = 'system (inactivity auto-close)';
+          t.closeReason = 'Auto-closed after 14 days of inactivity with no staff response.';
+          saveState();
+          console.log(`[ticket-bot] ⏰ Auto-closed ticket #${t.id} after 14 days of inactivity.`);
+
+          // Log it
+          const logEmbed = brandEmbed()
+            .setTitle(`⏰ Ticket #${t.id} Auto-Closed (Inactivity)`)
+            .setColor(0xe74c3c)
+            .setThumbnail(BRAND_ICON)
+            .setDescription(`Ticket auto-closed after 14 days with no staff response.`)
+            .addFields(
+              { name: '👤 Opener', value: `<@${t.openerId}>\n\`${t.openerTag}\``, inline: true },
+              { name: '📂 Category', value: t.categoryLabel, inline: true },
+              { name: '⏰ Opened', value: `<t:${Math.floor(t.openedAt / 1000)}:R>`, inline: true },
+            );
+          await sendToLogChannel(guild, { embeds: [logEmbed] });
+
+          // Delete the channel after a 10-second delay (gives user time to read)
+          setTimeout(async () => {
+            try {
+              await channel.delete('Auto-close: 14 days of inactivity');
+            } catch (err) {
+              console.warn('[ticket-bot] auto-close channel delete failed:', err);
+            }
+            t.channelId = null;
+            saveState();
+          }, 10_000).unref();
+        }
+      } catch (err) {
+        console.warn(`[ticket-bot] auto-close failed for ticket #${t.id}:`, err);
+      }
+      continue;
+    }
+
+    // Warn if open >7 days with no staff response and not yet warned
+    if (idleMs >= INACTIVITY_WARN_MS && t.inactivityWarnedAt === null) {
+      try {
+        const channel = await guild.channels.fetch(t.channelId).catch(() => null);
+        if (channel && channel.isTextBased()) {
+          t.inactivityWarnedAt = now;
+          saveState();
+          await (channel as TextChannel).send({
+            content: `<@${t.openerId}>`,
+            embeds: [
+              new EmbedBuilder()
+                .setColor(0xf1c40f)
+                .setTitle(`⚠️ Inactivity warning`)
+                .setDescription(`This ticket has been open for 7+ days with no staff response. If you still need help, please reply here. Otherwise, the ticket will be auto-closed in 3 days.`)
+                .setFooter({ text: 'Inactivity warning — 𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 Ticket Bot' }),
+            ],
+          });
+          console.log(`[ticket-bot] ⚠️ Warned ticket #${t.id} about inactivity.`);
+        }
+      } catch (err) {
+        console.warn(`[ticket-bot] inactivity warn failed for ticket #${t.id}:`, err);
+      }
+      continue;
+    }
+
+    // Auto-close if warned 3+ days ago and still no response
+    if (t.inactivityWarnedAt !== null && (now - t.inactivityWarnedAt) >= INACTIVITY_CLOSE_AFTER_WARN_MS) {
+      try {
+        const channel = await guild.channels.fetch(t.channelId).catch(() => null);
+        if (channel && channel.isTextBased()) {
+          await (channel as TextChannel).send({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(0xe74c3c)
+                .setTitle(`⏰ Ticket #${t.id} auto-closed (no response after warning)`)
+                .setDescription('This ticket is being auto-closed because no response was received after the inactivity warning. Please open a new ticket if you still need help.')
+                .setFooter({ text: 'Auto-close — 𝑇ℎ𝑒 𝐼𝐶𝐵𝑆 Ticket Bot' }),
+            ],
+          });
+          t.status = 'closed';
+          t.closedAt = now;
+          t.closerId = null;
+          t.closerTag = 'system (inactivity auto-close)';
+          t.closeReason = 'Auto-closed: no response 3 days after inactivity warning.';
+          saveState();
+          console.log(`[ticket-bot] ⏰ Auto-closed ticket #${t.id} (no response after warning).`);
+
+          const logEmbed = brandEmbed()
+            .setTitle(`⏰ Ticket #${t.id} Auto-Closed (Post-Warning)`)
+            .setColor(0xe74c3c)
+            .setThumbnail(BRAND_ICON)
+            .setDescription(`Auto-closed: no response 3 days after inactivity warning.`)
+            .addFields(
+              { name: '👤 Opener', value: `<@${t.openerId}>\n\`${t.openerTag}\``, inline: true },
+              { name: '⏰ Opened', value: `<t:${Math.floor(t.openedAt / 1000)}:R>`, inline: true },
+            );
+          await sendToLogChannel(guild, { embeds: [logEmbed] });
+
+          setTimeout(async () => {
+            try {
+              await channel.delete('Auto-close: no response after warning');
+            } catch (err) {
+              console.warn('[ticket-bot] auto-close channel delete failed:', err);
+            }
+            t.channelId = null;
+            saveState();
+          }, 10_000).unref();
+        }
+      } catch (err) {
+        console.warn(`[ticket-bot] post-warning auto-close failed for ticket #${t.id}:`, err);
+      }
+    }
+  }
+}, 60 * 60 * 1000).unref(); // every hour
