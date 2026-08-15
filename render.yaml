@@ -148,6 +148,24 @@ services:
         # Format (single role):  1510013691515502843
         # Format (multi role):   111111111111111111,222222222222222222,333333333333333333
 
+      - key: HEAD_OF_SUPPORT_ROLE_IDS
+        sync: false
+        # Q: Which Discord role(s) count as Head of Support? (optional but recommended)
+        #
+        # Head of Support is a senior staff role. Members with this role can:
+        #   - Use /ticket-promote to give Support Staff role to other users
+        #   - Use /ticket-demote to remove Support Staff role
+        #   - Use all regular staff commands
+        # They count as staff automatically (no need to also add them to
+        # TICKET_STAFF_ROLE_IDS, though you can if you want the role pings).
+        #
+        # You can also manage this at runtime via /ticket-head (admin-only).
+        # Leave EMPTY to fall back to "anyone with Manage Roles permission".
+        #
+        # To find it: Server Settings → Roles → right-click each role → Copy ID
+        #
+        # Format: 111111111111111111  (or comma-separated for multiple)
+
       # =====================================================================
       #  OPTIONAL — advanced configuration
       # =====================================================================

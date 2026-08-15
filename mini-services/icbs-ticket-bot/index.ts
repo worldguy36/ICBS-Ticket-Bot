@@ -95,6 +95,14 @@ const INITIAL_STAFF_ROLE_IDS = (process.env.TICKET_STAFF_ROLE_IDS || '')
 // Mutable — updated by /ticket-staff add/remove. Loaded from state file on
 // startup, falling back to the env var on first boot.
 let staffRoleIds: string[] = [...INITIAL_STAFF_ROLE_IDS];
+// Head of Support role IDs — senior staff who can promote/demote regular
+// support staff. Mutable at runtime via /ticket-head. Loaded from state
+// file on startup, falling back to the env var on first boot.
+const INITIAL_HEAD_OF_SUPPORT_ROLE_IDS = (process.env.HEAD_OF_SUPPORT_ROLE_IDS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+let headOfSupportRoleIds: string[] = [...INITIAL_HEAD_OF_SUPPORT_ROLE_IDS];
 // Render web services set PORT automatically. Use it when present so the
 // service binds to the port Render expects. Otherwise fall back to
 // ICBS_BOT_PORT (default 3040) for local dev / detached-child mode.
@@ -365,6 +373,7 @@ interface PersistedState {
   panelChannelId: string | null;
   staffRoleIds?: string[]; // optional — falls back to env var if absent
   blacklistedUserIds?: string[]; // users blocked from opening tickets
+  headOfSupportRoleIds?: string[]; // senior staff who can promote/demote
 }
 
 function loadState(): PersistedState {
@@ -379,6 +388,7 @@ function loadState(): PersistedState {
         panelChannelId: parsed.panelChannelId || null,
         staffRoleIds: Array.isArray(parsed.staffRoleIds) ? parsed.staffRoleIds : undefined,
         blacklistedUserIds: Array.isArray(parsed.blacklistedUserIds) ? parsed.blacklistedUserIds : [],
+        headOfSupportRoleIds: Array.isArray(parsed.headOfSupportRoleIds) ? parsed.headOfSupportRoleIds : undefined,
       };
     }
   } catch (err) {
@@ -406,6 +416,14 @@ if (Array.isArray(state.staffRoleIds) && state.staffRoleIds.length >= 0) {
   console.log(`[ticket-bot] 📋 Using ${staffRoleIds.length} staff role(s) from TICKET_STAFF_ROLE_IDS env var.`);
 }
 
+// Same pattern for Head of Support roles.
+if (Array.isArray(state.headOfSupportRoleIds)) {
+  headOfSupportRoleIds = state.headOfSupportRoleIds;
+  console.log(`[ticket-bot] 👑 Loaded ${headOfSupportRoleIds.length} Head of Support role(s) from tickets.json (overrides env var).`);
+} else {
+  console.log(`[ticket-bot] 👑 Using ${headOfSupportRoleIds.length} Head of Support role(s) from HEAD_OF_SUPPORT_ROLE_IDS env var.`);
+}
+
 // In-memory cooldowns (not persisted — that's fine, they reset on restart)
 const openCooldowns = new Map<string, number>(); // userId -> epoch ms of last open
 
@@ -415,7 +433,24 @@ const openCooldowns = new Map<string, number>(); // userId -> epoch ms of last o
 function isStaff(member: { roles: { cache: { has: (id: string) => boolean } } } | null | undefined): boolean {
   if (!member) return false;
   if (ADMIN_ROLE_ID && member.roles.cache.has(ADMIN_ROLE_ID)) return true;
+  if (headOfSupportRoleIds.some((r) => member.roles.cache.has(r))) return true;
   return staffRoleIds.some((r) => member.roles.cache.has(r));
+}
+
+// Head of Support = senior staff who can promote/demote regular support staff.
+function isHeadOfSupport(member: { roles: { cache: { has: (id: string) => boolean } }; permissions?: { has: (p: bigint) => boolean } } | null | undefined): boolean {
+  if (!member) return false;
+  if (ADMIN_ROLE_ID && member.roles.cache.has(ADMIN_ROLE_ID)) return true; // admins can do everything
+  if (headOfSupportRoleIds.some((r) => member.roles.cache.has(r))) return true;
+  // Fall back to ManageRoles permission if no HoS roles are configured
+  if (headOfSupportRoleIds.length === 0 && member.permissions?.has) {
+    try {
+      return member.permissions.has(PermissionFlagsBits.ManageRoles);
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 function categoryById(id: string): Category | undefined {
@@ -709,6 +744,41 @@ async function registerSlashCommands() {
       )
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
       .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ticket-promote')
+      .setDescription('Give a user the Support Staff role (Head of Support only).')
+      .addUserOption((opt) =>
+        opt.setName('user').setDescription('The user to promote to Support Staff.').setRequired(true),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ticket-demote')
+      .setDescription('Remove the Support Staff role from a user (Head of Support only).')
+      .addUserOption((opt) =>
+        opt.setName('user').setDescription('The user to demote from Support Staff.').setRequired(true),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('ticket-head')
+      .setDescription('Manage which roles count as Head of Support (admin only).')
+      .addStringOption((opt) =>
+        opt
+          .setName('action')
+          .setDescription('add, remove, or list Head of Support roles')
+          .setRequired(true)
+          .addChoices(
+            { name: 'add', value: 'add' },
+            { name: 'remove', value: 'remove' },
+            { name: 'list', value: 'list' },
+          ),
+      )
+      .addRoleOption((opt) =>
+        opt.setName('role').setDescription('The role to add or remove (required for add/remove).').setRequired(false),
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+      .toJSON(),
   ];
   const rest = new REST({ version: '10' }).setToken(TOKEN);
   await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), {
@@ -763,6 +833,15 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
           return;
         case 'ticket-blacklist':
           await handleBlacklistCommand(interaction);
+          return;
+        case 'ticket-promote':
+          await handlePromoteCommand(interaction);
+          return;
+        case 'ticket-demote':
+          await handleDemoteCommand(interaction);
+          return;
+        case 'ticket-head':
+          await handleHeadCommand(interaction);
           return;
       }
     }
@@ -1834,6 +1913,31 @@ async function handleHelpCommand(interaction: ChatInputCommandInteraction) {
         inline: false,
       },
       {
+        name: '👑 `/ticket-promote` (Head of Support only)',
+        value: 'Give a user the Support Staff role. They\'ll get a DM welcoming them to the team.\nExample: `/ticket-promote user:@newstaff`',
+        inline: false,
+      },
+      {
+        name: '📤 `/ticket-demote` (Head of Support only)',
+        value: 'Remove the Support Staff role from a user. They\'ll get a DM notification.\nExample: `/ticket-demote user:@formerstaff`',
+        inline: false,
+      },
+      {
+        name: '👑 `/ticket-head` (admin only)',
+        value: 'Manage which roles count as **Head of Support** — senior staff who can promote/demote others.\nExamples:\n• `/ticket-head action:add role:@HeadOfSupport`\n• `/ticket-head action:remove role:@HeadOfSupport`\n• `/ticket-head action:list`',
+        inline: false,
+      },
+      {
+        name: '👑 Role Hierarchy',
+        value: [
+          '**Admin** (TICKET_ADMIN_ROLE_ID) → can do everything',
+          '**Head of Support** (via /ticket-head) → can promote/demote + all staff powers',
+          '**Support Staff** (via /ticket-staff or /ticket-promote) → claim/close/answer tickets',
+          '**Members** → open tickets',
+        ].join('\n'),
+        inline: false,
+      },
+      {
         name: '📋 Button Actions (in ticket channels)',
         value: [
           '• **📋 Claim Ticket** — claim the ticket (staff only).',
@@ -2204,6 +2308,345 @@ async function handleBlacklistCommand(interaction: ChatInputCommandInteraction) 
       .setDescription(`<@${user.id}> was unblocked from opening tickets.`)
       .addFields(
         { name: 'User', value: `<@${user.id}>\n\`${user.tag}\``, inline: true },
+        { name: 'By', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+      );
+    await sendToLogChannel(interaction.guild, { embeds: [logEmbed] });
+    return;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// /ticket-promote slash command — Head of Support grants Support Staff role
+// ---------------------------------------------------------------------------
+async function handlePromoteCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guild) return;
+
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!isHeadOfSupport(member)) {
+    await interaction.reply({
+      content: '🚫 Only Head of Support (or admins) can promote users to Support Staff.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const targetUser = interaction.options.getUser('user', true);
+  if (targetUser.id === interaction.user.id) {
+    await interaction.reply({ content: '⚠️ You cannot promote yourself.', ephemeral: true });
+    return;
+  }
+  if (targetUser.bot) {
+    await interaction.reply({ content: '⚠️ You cannot promote a bot.', ephemeral: true });
+    return;
+  }
+
+  if (staffRoleIds.length === 0) {
+    await interaction.reply({
+      content: '⚠️ No Support Staff roles are configured. An admin must first add one with `/ticket-staff action:add role:@Role`.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+  if (!targetMember) {
+    await interaction.reply({ content: '⚠️ That user is not in this server.', ephemeral: true });
+    return;
+  }
+
+  // Check if user already has all staff roles
+  const missingStaffRoles = staffRoleIds.filter((id) => !targetMember.roles.cache.has(id));
+  if (missingStaffRoles.length === 0) {
+    await interaction.reply({
+      content: `⚠️ <@${targetUser.id}> already has all Support Staff roles.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.deferReply();
+
+  // Add all staff roles to the user
+  const added: string[] = [];
+  const failed: string[] = [];
+  for (const roleId of missingStaffRoles) {
+    try {
+      await targetMember.roles.add(roleId, `Promoted by ${interaction.user.tag} via /ticket-promote`);
+      added.push(`<@&${roleId}>`);
+    } catch (err) {
+      failed.push(`<@&${roleId}> (${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
+
+  const embed = brandEmbed()
+    .setTitle('👑 User Promoted to Support Staff')
+    .setColor(0x2ecc71)
+    .setThumbnail(BRAND_ICON)
+    .setDescription(`<@${targetUser.id}> (\`${targetUser.tag}\`) has been promoted to Support Staff by <@${interaction.user.id}>.`)
+    .addFields(
+      { name: '✅ Roles added', value: added.join(', ') || '—', inline: false },
+      ...(failed.length > 0 ? [{ name: '❌ Failed to add', value: failed.join('\n'), inline: false }] : []),
+    );
+  await interaction.editReply({ embeds: [embed] });
+
+  // Log it
+  const logEmbed = brandEmbed()
+    .setTitle('➕ User Promoted')
+    .setColor(0x2ecc71)
+    .setThumbnail(BRAND_ICON)
+    .setDescription(`A user was promoted to Support Staff.`)
+    .addFields(
+      { name: '👤 Promoted', value: `<@${targetUser.id}>\n\`${targetUser.tag}\``, inline: true },
+      { name: '👑 By (Head of Support)', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+      { name: '✅ Roles added', value: added.join(', ') || '—', inline: false },
+    );
+  await sendToLogChannel(interaction.guild, { embeds: [logEmbed] });
+
+  // DM the promoted user
+  const dmEmbed = brandEmbed()
+    .setTitle('🎉 You\'ve been promoted!')
+    .setColor(0x2ecc71)
+    .setThumbnail(BRAND_ICON)
+    .setDescription(
+      [
+        `You've been promoted to **Support Staff** in **${interaction.guild.name}** by <@${interaction.user.id}>.`,
+        '',
+        'You can now:',
+        '• See and claim tickets from #ticket-logs',
+        '• Use staff commands like `/ticket-close`, `/ticket-add`, `/ticket-info`',
+        '• Read the staff handbook (ask a Head of Support for the link)',
+        '',
+        'Welcome to the team! 🎫',
+      ].join('\n'),
+    );
+  await safeDm(targetUser, dmEmbed);
+}
+
+// ---------------------------------------------------------------------------
+// /ticket-demote slash command — Head of Support removes Support Staff role
+// ---------------------------------------------------------------------------
+async function handleDemoteCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guild) return;
+
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  if (!isHeadOfSupport(member)) {
+    await interaction.reply({
+      content: '🚫 Only Head of Support (or admins) can demote users from Support Staff.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const targetUser = interaction.options.getUser('user', true);
+  if (targetUser.id === interaction.user.id) {
+    await interaction.reply({ content: '⚠️ You cannot demote yourself. Ask another Head of Support.', ephemeral: true });
+    return;
+  }
+
+  const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+  if (!targetMember) {
+    await interaction.reply({ content: '⚠️ That user is not in this server.', ephemeral: true });
+    return;
+  }
+
+  // Don't allow demoting Head of Support or admins
+  if (isHeadOfSupport(targetMember)) {
+    await interaction.reply({
+      content: '⚠️ You cannot demote a Head of Support or admin. Remove their Head of Support role first via `/ticket-head`.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Check which staff roles the user has
+  const hasStaffRoles = staffRoleIds.filter((id) => targetMember.roles.cache.has(id));
+  if (hasStaffRoles.length === 0) {
+    await interaction.reply({
+      content: `⚠️ <@${targetUser.id}> doesn't have any Support Staff roles.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.deferReply();
+
+  const removed: string[] = [];
+  const failed: string[] = [];
+  for (const roleId of hasStaffRoles) {
+    try {
+      await targetMember.roles.remove(roleId, `Demoted by ${interaction.user.tag} via /ticket-demote`);
+      removed.push(`<@&${roleId}>`);
+    } catch (err) {
+      failed.push(`<@&${roleId}> (${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
+
+  const embed = brandEmbed()
+    .setTitle('📤 User Demoted from Support Staff')
+    .setColor(0xe74c3c)
+    .setThumbnail(BRAND_ICON)
+    .setDescription(`<@${targetUser.id}> (\`${targetUser.tag}\`) has been removed from Support Staff by <@${interaction.user.id}>.`)
+    .addFields(
+      { name: '✅ Roles removed', value: removed.join(', ') || '—', inline: false },
+      ...(failed.length > 0 ? [{ name: '❌ Failed to remove', value: failed.join('\n'), inline: false }] : []),
+    );
+  await interaction.editReply({ embeds: [embed] });
+
+  // Log it
+  const logEmbed = brandEmbed()
+    .setTitle('➖ User Demoted')
+    .setColor(0xe74c3c)
+    .setThumbnail(BRAND_ICON)
+    .setDescription(`A user was demoted from Support Staff.`)
+    .addFields(
+      { name: '👤 Demoted', value: `<@${targetUser.id}>\n\`${targetUser.tag}\``, inline: true },
+      { name: '👑 By (Head of Support)', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+      { name: '✅ Roles removed', value: removed.join(', ') || '—', inline: false },
+    );
+  await sendToLogChannel(interaction.guild, { embeds: [logEmbed] });
+
+  // DM the demoted user
+  const dmEmbed = brandEmbed()
+    .setTitle('📤 Support Staff role removed')
+    .setColor(0xe74c3c)
+    .setThumbnail(BRAND_ICON)
+    .setDescription(
+      [
+        `Your Support Staff role in **${interaction.guild.name}** has been removed by <@${interaction.user.id}>.`,
+        '',
+        'If you believe this was a mistake, please contact a Head of Support or admin.',
+      ].join('\n'),
+    );
+  await safeDm(targetUser, dmEmbed);
+}
+
+// ---------------------------------------------------------------------------
+// /ticket-head slash command — admin manages Head of Support roles
+// ---------------------------------------------------------------------------
+async function handleHeadCommand(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guild) return;
+
+  // Admin-only (Administrator permission required to manage Head of Support roles)
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const isAdmin = (ADMIN_ROLE_ID && member?.roles.cache.has(ADMIN_ROLE_ID)) || (member?.permissions.has(PermissionFlagsBits.Administrator) ?? false);
+  if (!isAdmin) {
+    await interaction.reply({
+      content: '🚫 Only admins can manage Head of Support roles.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const action = interaction.options.getString('action', true);
+  const role = interaction.options.getRole('role');
+
+  if (action === 'list') {
+    if (headOfSupportRoleIds.length === 0) {
+      await interaction.reply({
+        content: '👑 **No Head of Support roles are configured.**\n\nUse `/ticket-head action:add role:@HeadOfSupport` to add one.\n\nUntil then, anyone with the **Manage Roles** permission counts as Head of Support.',
+        ephemeral: true,
+      });
+      return;
+    }
+    const lines: string[] = [];
+    for (const id of headOfSupportRoleIds) {
+      try {
+        const r = await interaction.guild.roles.fetch(id);
+        lines.push(`• ${r ? `<@&${r.id}> (\`${r.name}\`)` : `~~deleted role~~ (\`${id}\`)`}`);
+      } catch {
+        lines.push(`• ~~deleted role~~ (\`${id}\`)`);
+      }
+    }
+    const embed = brandEmbed()
+      .setTitle('👑 Head of Support Roles')
+      .setColor(0xf1c40f)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`${headOfSupportRoleIds.length} role(s) count as Head of Support:\n\n${lines.join('\n')}\n\n**Head of Support can:**\n• Use \`/ticket-promote\` to grant Support Staff role\n• Use \`/ticket-demote\` to remove Support Staff role\n• Use all regular staff commands`)
+      .addFields({
+        name: '💡 Manage',
+        value: '• `/ticket-head action:add role:@Role`\n• `/ticket-head action:remove role:@Role`\n• `/ticket-head action:list`',
+        inline: false,
+      });
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+    return;
+  }
+
+  if (!role) {
+    await interaction.reply({
+      content: '⚠️ You must specify a role. Example: `/ticket-head action:add role:@HeadOfSupport`',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (action === 'add') {
+    if (headOfSupportRoleIds.includes(role.id)) {
+      await interaction.reply({
+        content: `⚠️ <@&${role.id}> (\`${role.name}\`) is already a Head of Support role.`,
+        ephemeral: true,
+      });
+      return;
+    }
+    headOfSupportRoleIds.push(role.id);
+    state.headOfSupportRoleIds = headOfSupportRoleIds;
+    saveState();
+
+    const embed = brandEmbed()
+      .setTitle('👑 Head of Support Role Added')
+      .setColor(0xf1c40f)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`<@&${role.id}> (\`${role.name}\`) is now a Head of Support role.`)
+      .addFields(
+        { name: '📊 Total Head of Support roles', value: String(headOfSupportRoleIds.length), inline: true },
+        { name: '👤 Added by', value: `<@${interaction.user.id}>`, inline: true },
+      )
+      .setFooter({ text: 'Members with this role can now use /ticket-promote and /ticket-demote.' });
+    await interaction.reply({ embeds: [embed] });
+
+    const logEmbed = brandEmbed()
+      .setTitle('👑 Head of Support Role Added')
+      .setColor(0xf1c40f)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`A new Head of Support role was added by <@${interaction.user.id}>.`)
+      .addFields(
+        { name: 'Role', value: `<@&${role.id}> (\`${role.name}\`)`, inline: true },
+        { name: 'By', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
+      );
+    await sendToLogChannel(interaction.guild, { embeds: [logEmbed] });
+    return;
+  }
+
+  if (action === 'remove') {
+    const idx = headOfSupportRoleIds.indexOf(role.id);
+    if (idx === -1) {
+      await interaction.reply({
+        content: `⚠️ <@&${role.id}> (\`${role.name}\`) is not currently a Head of Support role.`,
+        ephemeral: true,
+      });
+      return;
+    }
+    headOfSupportRoleIds.splice(idx, 1);
+    state.headOfSupportRoleIds = headOfSupportRoleIds;
+    saveState();
+
+    const embed = brandEmbed()
+      .setTitle('📤 Head of Support Role Removed')
+      .setColor(0xe74c3c)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`<@&${role.id}> (\`${role.name}\`) is no longer a Head of Support role.`)
+      .addFields(
+        { name: '📊 Remaining Head of Support roles', value: String(headOfSupportRoleIds.length), inline: true },
+        { name: '👤 Removed by', value: `<@${interaction.user.id}>`, inline: true },
+      );
+    await interaction.reply({ embeds: [embed] });
+
+    const logEmbed = brandEmbed()
+      .setTitle('📤 Head of Support Role Removed')
+      .setColor(0xe74c3c)
+      .setThumbnail(BRAND_ICON)
+      .setDescription(`A Head of Support role was removed by <@${interaction.user.id}>.`)
+      .addFields(
+        { name: 'Role', value: `<@&${role.id}> (\`${role.name}\`)`, inline: true },
         { name: 'By', value: `<@${interaction.user.id}>\n\`${interaction.user.tag}\``, inline: true },
       );
     await sendToLogChannel(interaction.guild, { embeds: [logEmbed] });
